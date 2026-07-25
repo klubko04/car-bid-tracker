@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Car Bid Tracker</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e2230; --border: #2a2f3d;
+    --text: #e6e9f0; --muted: #8b93a7; --accent: #4f8cff; --green: #34d399;
+    --amber: #fbbf24; --red: #f87171; --chip: #262b3a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 16px 80px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
+  h1 { font-size: 22px; font-weight: 700; }
+  h1 span { color: var(--accent); }
+  .provider { font-size: 12px; color: var(--muted); background: var(--chip); padding: 4px 10px; border-radius: 20px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 9px 18px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-weight: 600; }
+  .tab.active { color: var(--text); border-color: var(--accent); }
+  .btn { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 9px 16px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  .btn:hover { filter: brightness(1.1); }
+  .btn.ghost { background: var(--chip); color: var(--text); }
+  .btn.small { padding: 5px 10px; font-size: 12px; }
+  .btn.danger { background: #3a2027; color: var(--red); }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr.car-row { cursor: pointer; }
+  tr.car-row:hover { background: var(--panel); }
+  .chip { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; background: var(--chip); }
+  .chip.watching { color: var(--accent); }
+  .chip.bidding { color: var(--amber); }
+  .chip.won { color: var(--green); }
+  .chip.lost, .chip.archived { color: var(--muted); }
+  .money { font-variant-numeric: tabular-nums; }
+  .pos { color: var(--green); font-weight: 700; }
+  .neg { color: var(--red); font-weight: 700; }
+  .warn { color: var(--amber); }
+  .muted { color: var(--muted); }
+  .verdict { font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+  .verdict.strong { color: var(--green); } .verdict.marginal { color: var(--amber); }
+  .verdict.over_budget, .verdict.losing { color: var(--red); } .verdict.none { color: var(--muted); }
+  .detail { background: var(--panel); }
+  .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; padding: 16px 10px; }
+  .card { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .card h4 { font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .06em; margin-bottom: 10px; }
+  .line { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
+  .line.total { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 8px; font-weight: 700; }
+  .statusbar { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 10px 14px; }
+  .statusbar .chip { cursor: pointer; opacity: .55; }
+  .statusbar .chip.on { opacity: 1; outline: 1px solid var(--border); }
+  /* modal */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: flex-start; justify-content: center; overflow-y: auto; padding: 30px 12px; z-index: 50; }
+  .overlay.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; width: 100%; max-width: 760px; padding: 22px; }
+  .modal h2 { font-size: 17px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  label { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+  input, select, textarea { width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+  input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); }
+  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+  .section-title { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 18px 0 10px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 10px; }
+  .check { display: flex; align-items: center; gap: 6px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 12px; cursor: pointer; }
+  .check input { width: auto; }
+  .modal-actions { display: flex; justify-content: space-between; margin-top: 20px; gap: 10px; }
+  .lookup-msg { font-size: 12px; margin-top: 6px; }
+  /* ranking */
+  .rank-list { display: flex; flex-direction: column; gap: 12px; }
+  .rank-card { display: flex; align-items: center; gap: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; cursor: pointer; flex-wrap: wrap; }
+  .rank-num { font-size: 22px; font-weight: 800; color: var(--accent); width: 40px; text-align: center; }
+  .rank-main { flex: 1; min-width: 200px; }
+  .rank-title { font-weight: 700; font-size: 15px; }
+  .rank-sub { font-size: 12px; color: var(--muted); }
+  .rank-stat { text-align: right; min-width: 110px; }
+  .rank-stat .v { font-weight: 700; font-size: 15px; }
+  .rank-stat .k { font-size: 10px; text-transform: uppercase; color: var(--muted); letter-spacing: .05em; }
+  .empty { text-align: center; color: var(--muted); padding: 50px 0; }
+  .banner { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+  @media (max-width: 720px) { .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Car <span>Bid</span> Tracker</h1>
+    <div class="row">
+      <span class="provider" id="providerBadge">…</span>
+      <button class="btn" onclick="openModal()">+ Add Car</button>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="watchlist" onclick="switchTab('watchlist')">Watchlist</div>
+    <div class="tab" data-tab="searches" onclick="switchTab('searches')">Scanner</div>
+    <div class="tab" data-tab="ranking" onclick="switchTab('ranking')">Value Ranking</div>
+    <div class="tab" data-tab="calc" onclick="switchTab('calc')">Quick Calculator</div>
+  </div>
+
+  <!-- WATCHLIST -->
+  <div id="tab-watchlist">
+    <div class="banner">All numbers are 2026 estimates. Rule: keep <b>all-in cost ≤ 40–60%</b> of clean-title value; rebuilt resale ≈ 70% of clean value. Max bid is computed per car from its platform fee stack + contingencies.</div>
+    <div class="row" style="margin-bottom:12px">
+      <select id="statusFilter" style="width:170px" onchange="loadCars()">
+        <option value="">All statuses</option>
+      </select>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Vehicle</th><th class="hide-sm">Lot / Source</th><th>Auction</th><th>Status</th>
+        <th class="hide-sm">Bid</th><th>Max bid</th><th>Margin</th><th></th>
+      </tr></thead>
+      <tbody id="carRows"></tbody>
+    </table>
+    <div class="empty" id="emptyWatch" style="display:none">No cars tracked yet. Click <b>+ Add Car</b> — try demo lot <b>58214036</b>.</div>
+  </div>
+
+  <!-- SCANNER / SAVED SEARCHES -->
+  <div id="tab-searches" style="display:none">
+    <div class="banner" id="scannerBanner">Saved searches run automatically in the background while the server is running, pulling <b>real Copart + IAAI</b> lots (live bid, damage, title, odometer, sale date) via Apibara. Free Test plan = 100 calls/month, so each search polled every 24h ≈ 30 calls/month. Keep 1–2 active searches, or upgrade the plan for more.</div>
+    <div class="card" style="margin-bottom:16px">
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.06em;margin-bottom:10px">New saved search</h4>
+      <div class="grid">
+        <div><label>Name</label><input id="s_name" placeholder="Lexus IS300 hunt"></div>
+        <div><label>Make</label><input id="s_make" placeholder="Lexus"></div>
+        <div><label>Model</label><input id="s_model" placeholder="IS 300"></div>
+        <div><label>Trim (optional)</label><input id="s_trim"></div>
+        <div><label>Year min</label><input type="number" id="s_ymin" placeholder="2015"></div>
+        <div><label>Year max</label><input type="number" id="s_ymax" placeholder="2018"></div>
+        <div><label>Max price $</label><input type="number" id="s_price" placeholder="8000"></div>
+        <div><label>Max miles</label><input type="number" id="s_miles" placeholder="120000"></div>
+        <div><label>ZIP (search center)</label><input id="s_zip" placeholder="97201"></div>
+        <div><label>Radius mi (≤100 free plan)</label><input type="number" id="s_radius" value="100"></div>
+        <div><label>State (if no ZIP)</label><input id="s_state" placeholder="OR"></div>
+      </div>
+      <div style="margin-top:12px"><button class="btn" onclick="createSearch()">+ Save search</button>
+        <button class="btn ghost" style="margin-left:8px" onclick="runAllSearches(this)">Run all now</button></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <h4 style="font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:.06em;margin-bottom:10px">Copart CSV import (best salvage data)</h4>
+      <div class="muted" style="font-size:12px;margin-bottom:10px">Register free at copart.com, download a sales-list CSV from <a href="https://www.copart.com/content/us/en/buyer/sales/download-sales-data" target="_blank" style="color:var(--accent)">Download Sales Data</a>, and import it here. Rows matching your active saved searches are added to the watchlist with Copart's own damage, run/drive, sale date, est. retail value and repair cost.</div>
+      <div class="row">
+        <input type="file" id="csvFile" accept=".csv" style="flex:1;min-width:200px">
+        <button class="btn" onclick="importCsv(this)">Import CSV</button>
+      </div>
+      <div class="lookup-msg" id="csvMsg"></div>
+    </div>
+    <div class="rank-list" id="searchList"></div>
+    <div class="empty" id="emptySearches" style="display:none">No saved searches yet — add one above and the scanner starts hunting.</div>
+  </div>
+
+  <!-- RANKING -->
+  <div id="tab-ranking" style="display:none">
+    <div class="banner">Active cars ranked by <b>margin %</b> — estimated rebuilt-title resale minus all-in cost, relative to what you'd invest. Set clean value + planned bid on a car to rank it.</div>
+    <div class="rank-list" id="rankList"></div>
+    <div class="empty" id="emptyRank" style="display:none">Nothing to rank yet.</div>
+  </div>
+
+  <!-- QUICK CALC -->
+  <div id="tab-calc" style="display:none">
+    <div class="card" style="max-width:860px">
+      <div class="grid">
+        <div><label>Platform</label><select id="qcPlatform"></select></div>
+        <div><label>Title</label><select id="qcTitle"><option value="salvage">Salvage</option><option value="clean">Clean</option></select></div>
+        <div><label>Damage</label><select id="qcDamage"></select></div>
+        <div><label>Your bid $</label><input type="number" id="qcBid" placeholder="3000"></div>
+        <div><label>Clean-title value $</label><input type="number" id="qcClean" placeholder="15000"></div>
+        <div><label>Repair estimate $</label><input type="number" id="qcRepair" placeholder="3500"></div>
+        <div><label>Transport $</label><input type="number" id="qcTransport" placeholder="500"></div>
+        <div><label>Target ratio</label><select id="qcRatio">
+          <option value="0.4">40% (conservative)</option>
+          <option value="0.5" selected>50% (standard)</option>
+          <option value="0.6">60% (aggressive)</option>
+        </select></div>
+      </div>
+      <div class="section-title">Hidden-cost contingencies</div>
+      <div class="checks" id="qcChecks"></div>
+      <div style="margin-top:16px"><button class="btn" onclick="runQuickCalc()">Calculate</button></div>
+    </div>
+    <div id="qcResult" style="margin-top:16px"></div>
+  </div>
+</div>
+
+<!-- ADD/EDIT MODAL -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h2 id="modalTitle">Add Car</h2>
+
+    <div class="section-title" style="margin-top:0">Lookup (live API or demo)</div>
+    <div class="row">
+      <div style="flex:1;min-width:140px"><label>VIN</label><input id="f_vin_lookup" placeholder="VIN…"></div>
+      <div style="flex:1;min-width:110px"><label>Lot #</label><input id="f_lot_lookup" placeholder="Lot #…"></div>
+      <div style="width:110px"><label>Source</label><select id="f_source_lookup"><option value="copart">Copart</option><option value="iaai">IAAI</option></select></div>
+      <button class="btn ghost" onclick="doLookup()">Fetch</button>
+    </div>
+    <div class="lookup-msg" id="lookupMsg"></div>
+
+    <div class="section-title">Vehicle</div>
+    <div class="grid">
+      <div><label>Year</label><input type="number" id="f_year"></div>
+      <div><label>Make</label><input id="f_make"></div>
+      <div><label>Model</label><input id="f_model"></div>
+      <div><label>Trim</label><input id="f_trim"></div>
+      <div><label>VIN</label><input id="f_vin"></div>
+      <div><label>Lot #</label><input id="f_lot"></div>
+      <div><label>Source</label><select id="f_source"><option value="copart">Copart</option><option value="iaai">IAAI</option></select></div>
+      <div><label>Title</label><select id="f_title"><option value="salvage">Salvage</option><option value="clean">Clean</option></select></div>
+      <div><label>Damage</label><select id="f_damage"></select></div>
+      <div><label>Run &amp; drive</label><select id="f_rundrive"><option value="1">Yes</option><option value="0">No</option></select></div>
+      <div><label>Auction date/time</label><input type="datetime-local" id="f_date"></div>
+      <div><label>Location</label><input id="f_location"></div>
+    </div>
+    <div style="margin-top:12px"><label>Listing URL</label><input id="f_url" placeholder="https://…"></div>
+
+    <div class="section-title">Economics</div>
+    <div class="grid">
+      <div><label>Buying route</label><select id="f_platform"></select></div>
+      <div><label>Current bid $</label><input type="number" id="f_current"></div>
+      <div><label>My planned bid $</label><input type="number" id="f_planned"></div>
+      <div><label>Clean-title value $</label><input type="number" id="f_clean"></div>
+      <div><label>Repair estimate $</label><input type="number" id="f_repair"></div>
+      <div><label>Transport $</label><input type="number" id="f_transport"></div>
+      <div><label>Target ratio</label><select id="f_ratio">
+        <option value="0.4">40% (conservative)</option>
+        <option value="0.5" selected>50% (standard)</option>
+        <option value="0.6">60% (aggressive)</option>
+      </select></div>
+      <div><label>Rebuilt resale factor</label><select id="f_rebuilt">
+        <option value="0.6">60% of clean</option>
+        <option value="0.7" selected>70% of clean</option>
+        <option value="0.8">80% of clean</option>
+      </select></div>
+    </div>
+    <div class="section-title">Hidden-cost contingencies</div>
+    <div class="checks" id="f_checks"></div>
+    <div style="margin-top:12px"><label>Notes</label><textarea id="f_notes" rows="2"></textarea></div>
+
+    <div class="modal-actions">
+      <button class="btn danger" id="deleteBtn" style="display:none" onclick="deleteCar()">Delete</button>
+      <div class="row" style="margin-left:auto">
+        <button class="btn ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn" onclick="saveCar()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let META = null, CARS = [], editingId = null, expandedId = null;
+
+const $ = id => document.getElementById(id);
+const fmt = n => n == null ? '—' : '$' + Number(n).toLocaleString('en-US', {maximumFractionDigits: 0});
+const fmtC = n => n == null ? '—' : '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+const VERDICTS = {
+  strong: ['STRONG — inside budget', 'strong'],
+  marginal: ['MARGINAL — 50–60% zone', 'marginal'],
+  over_budget: ['OVER BUDGET — >60% of clean', 'over_budget'],
+  losing: ['LOSING — costs exceed resale', 'losing'],
+  no_bid_set: ['Set a planned bid', 'none'],
+  set_clean_value: ['Set clean-title value', 'none'],
+};
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+async function init() {
+  META = await api('/api/meta');
+  if (META.scanner_configured) {
+    const src = META.discovery_source === 'apibara' ? 'Apibara (Copart + IAAI live)' : 'MarketCheck';
+    $('providerBadge').textContent = `Scanner: ${src} · polls every ${META.poll_hours}h · alerts: ${META.smtp_configured ? 'email + in-app' : 'in-app'}`;
+  } else {
+    $('providerBadge').textContent = 'Scanner off — set APIBARA_API_KEY in .env';
+  }
+  for (const sel of ['f_platform', 'qcPlatform'])
+    $(sel).innerHTML = Object.entries(META.platforms).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+  for (const sel of ['f_damage', 'qcDamage'])
+    $(sel).innerHTML = Object.entries(META.damage_types).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+  $('statusFilter').innerHTML = '<option value="">All statuses</option>' +
+    META.statuses.map(s => `<option value="${s}">${s}</option>`).join('');
+  const checksHtml = pref => Object.entries(META.contingencies).map(([k, c]) =>
+    `<label class="check"><input type="checkbox" id="${pref}${k}"> ${c.label} <span class="muted">$${c.amount}</span></label>`).join('');
+  $('f_checks').innerHTML = checksHtml('fc_');
+  $('qcChecks').innerHTML = checksHtml('qc_');
+  loadCars();
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  for (const t of ['watchlist', 'searches', 'ranking', 'calc']) $('tab-' + t).style.display = t === name ? '' : 'none';
+  if (name === 'ranking') loadRanking();
+  if (name === 'watchlist') loadCars();
+  if (name === 'searches') loadSearches();
+}
+
+/* ---------- watchlist ---------- */
+async function loadCars() {
+  const st = $('statusFilter').value;
+  CARS = await api('/api/cars' + (st ? '?status=' + st : ''));
+  renderCars();
+}
+
+function daysUntil(iso) {
+  if (!iso) return null;
+  const d = Math.ceil((new Date(iso) - new Date()) / 86400000);
+  return isNaN(d) ? null : d;
+}
+
+function renderCars() {
+  const tb = $('carRows');
+  $('emptyWatch').style.display = CARS.length ? 'none' : '';
+  tb.innerHTML = CARS.map(c => {
+    const m = c.metrics, v = VERDICTS[m.verdict] || VERDICTS.no_bid_set;
+    const du = daysUntil(c.auction_date);
+    const dateTxt = c.auction_date
+      ? `${new Date(c.auction_date).toLocaleDateString()} ${du != null ? `<div class="muted" style="font-size:11px">${du < 0 ? 'passed' : du + 'd left'}</div>` : ''}`
+      : '<span class="muted">—</span>';
+    const margin = m.margin == null ? '<span class="muted">—</span>'
+      : `<span class="${m.margin >= 0 ? 'pos' : 'neg'}">${fmt(m.margin)}${m.margin_pct != null ? ` <span class="muted" style="font-weight:400">(${m.margin_pct}%)</span>` : ''}</span>`;
+    const bid = c.planned_bid || c.current_bid;
+    return `
+    <tr class="car-row" onclick="toggleDetail(${c.id})">
+      <td>${c.is_new ? '<span class="chip" style="color:var(--green);margin-right:6px">NEW</span>' : ''}<b>${c.year || ''} ${esc(c.make)} ${esc(c.model)}</b> <span class="muted">${esc(c.trim)}</span>
+        <div class="muted" style="font-size:11px">${esc(META.damage_types[c.damage_type] || '')}${c.run_drive ? ' · runs' : ' · <span class="warn">non-runner</span>'} · ${esc(c.title_type)}${c.miles ? ' · ' + Number(c.miles).toLocaleString() + ' mi' : ''}</div></td>
+      <td class="hide-sm">${esc(c.lot_number) || '—'}<div class="muted" style="font-size:11px">${esc(c.source)}</div></td>
+      <td>${dateTxt}</td>
+      <td><span class="chip ${c.status}">${c.status}</span></td>
+      <td class="hide-sm money">${bid ? fmt(bid) : '<span class="muted">—</span>'}</td>
+      <td class="money"><b>${m.max_bid != null ? fmt(m.max_bid) : '—'}</b></td>
+      <td class="money">${margin}<div class="verdict ${v[1]}">${v[0]}</div></td>
+      <td><button class="btn ghost small" onclick="event.stopPropagation();openModal(${c.id})">Edit</button></td>
+    </tr>
+    ${expandedId === c.id ? detailRow(c) : ''}`;
+  }).join('');
+}
+
+function detailRow(c) {
+  const m = c.metrics;
+  const feeLines = m.all_in ? m.all_in.fees.items.map(([l, a]) => `<div class="line"><span class="muted">${esc(l)}</span><span class="money">${fmtC(a)}</span></div>`).join('') : '<div class="muted">Set a planned bid to see the fee stack.</div>';
+  const contLines = m.contingency.items.length ? m.contingency.items.map(([l, a]) => `<div class="line"><span class="muted">${esc(l)}</span><span class="money">${fmtC(a)}</span></div>`).join('') : '<div class="muted">None selected.</div>';
+  const statusChips = META.statuses.map(s => `<span class="chip ${s} ${c.status === s ? 'on' : ''}" onclick="event.stopPropagation();setStatus(${c.id},'${s}')">${s}</span>`).join('');
+  return `<tr class="detail"><td colspan="8">
+    <div class="statusbar"><span class="muted" style="align-self:center;font-size:11px">STATUS:</span>${statusChips}
+      ${c.listing_url ? `<a href="${escAttr(c.listing_url)}" target="_blank" class="chip" style="text-decoration:none;color:var(--accent)" onclick="event.stopPropagation()">Open listing ↗</a>` : ''}</div>
+    <div class="detail-grid">
+      <div class="card"><h4>Fee stack ${m.all_in ? 'at ' + fmt(m.all_in.bid) + ' bid' : ''}</h4>${feeLines}
+        ${m.all_in ? `<div class="line total"><span>Fees total</span><span class="money">${fmtC(m.all_in.fees.total)}</span></div>` : ''}</div>
+      <div class="card"><h4>Contingencies + fixed</h4>${contLines}
+        <div class="line"><span class="muted">Repair estimate</span><span class="money">${fmtC(c.repair_estimate)}</span></div>
+        <div class="line"><span class="muted">Transport</span><span class="money">${fmtC(c.transport_estimate)}</span></div>
+        <div class="line total"><span>Fixed costs total</span><span class="money">${fmtC((c.repair_estimate||0)+(c.transport_estimate||0)+m.contingency.total)}</span></div></div>
+      <div class="card"><h4>The verdict</h4>
+        <div class="line"><span class="muted">Clean-title value</span><span class="money">${fmt(c.clean_value)}
+          <button class="btn ghost small" style="margin-left:8px" onclick="event.stopPropagation();fetchValue(${c.id}, this)" title="Median price of matching used dealer listings via MarketCheck (1-2 API calls)">⟳ comps</button></span></div>
+        <div class="line"><span class="muted">Budget ceiling (${Math.round((c.target_ratio||0.5)*100)}%)</span><span class="money">${fmt(m.budget_ceiling)}</span></div>
+        <div class="line"><span class="muted">Est. rebuilt resale</span><span class="money">${fmt(m.rebuilt_resale)}</span></div>
+        ${m.all_in ? `<div class="line"><span class="muted">All-in cost</span><span class="money">${fmt(m.all_in.total)}</span></div>` : ''}
+        <div class="line total"><span>MAX BID</span><span class="money pos">${m.max_bid != null ? fmt(m.max_bid) : '—'}</span></div>
+        ${m.margin != null ? `<div class="line total"><span>Margin</span><span class="money ${m.margin >= 0 ? 'pos' : 'neg'}">${fmt(m.margin)} (${m.margin_pct}%)</span></div>` : ''}
+        ${m.damage_warning ? `<div class="warn" style="margin-top:8px;font-size:12px">⚠ ${esc(m.damage_warning)}</div>` : ''}
+        ${c.notes ? `<div class="muted" style="margin-top:8px;font-size:12px">${esc(c.notes)}</div>` : ''}</div>
+    </div></td></tr>`;
+}
+
+function toggleDetail(id) {
+  expandedId = expandedId === id ? null : id;
+  const c = CARS.find(x => x.id === id);
+  if (c && c.is_new) {
+    c.is_new = 0;
+    api('/api/cars/' + id, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({is_new: false})});
+  }
+  renderCars();
+}
+
+/* ---------- scanner / saved searches ---------- */
+async function loadSearches() {
+  const searches = await api('/api/searches');
+  $('emptySearches').style.display = searches.length ? 'none' : '';
+  $('searchList').innerHTML = searches.map(s => {
+    const crit = [
+      [s.make, s.model, s.trim].filter(Boolean).join(' '),
+      (s.year_min || s.year_max) ? `${s.year_min || '…'}–${s.year_max || '…'}` : '',
+      s.price_max ? `≤ ${fmt(s.price_max)}` : '',
+      s.miles_max ? `≤ ${Number(s.miles_max).toLocaleString()} mi` : '',
+      s.zip ? `${s.zip} +${s.radius || 100}mi` : (s.state || 'nationwide'),
+    ].filter(Boolean).join(' · ');
+    const lastRun = s.last_run_at ? new Date(s.last_run_at).toLocaleString() : 'never';
+    return `<div class="rank-card" style="cursor:default">
+      <div class="rank-main">
+        <div class="rank-title">${esc(s.name || crit || 'Search #' + s.id)} ${s.active ? '' : '<span class="chip lost">paused</span>'}</div>
+        <div class="rank-sub">${esc(crit)}</div>
+        <div class="rank-sub">Last run: ${esc(lastRun)}${s.last_num_found != null ? ` · ${s.last_num_found} listings matched` : ''}</div>
+        ${s.last_error ? `<div class="neg" style="font-size:12px;margin-top:4px">${esc(s.last_error)}</div>` : ''}
+      </div>
+      <div class="row">
+        <button class="btn ghost small" onclick="runOneSearch(${s.id}, this)">Run now</button>
+        <button class="btn ghost small" onclick="toggleSearch(${s.id}, ${s.active ? 'false' : 'true'})">${s.active ? 'Pause' : 'Resume'}</button>
+        <button class="btn danger small" onclick="deleteSearch(${s.id})">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function createSearch() {
+  const body = {
+    name: $('s_name').value, make: $('s_make').value, model: $('s_model').value,
+    trim: $('s_trim').value, year_min: +$('s_ymin').value || null, year_max: +$('s_ymax').value || null,
+    price_max: +$('s_price').value || null, miles_max: +$('s_miles').value || null,
+    zip: $('s_zip').value.trim(), radius: +$('s_radius').value || 100,
+    state: $('s_state').value.trim(), active: true,
+  };
+  if (!body.make && !body.model) { alert('Set at least a make or model.'); return; }
+  await api('/api/searches', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  for (const id of ['s_name','s_make','s_model','s_trim','s_ymin','s_ymax','s_price','s_miles','s_zip','s_state']) $(id).value = '';
+  $('s_radius').value = 100;
+  loadSearches();
+}
+
+async function runAllSearches(btn) {
+  btn.disabled = true; btn.textContent = 'Running…';
+  try {
+    const r = await api('/api/searches/run', {method: 'POST'});
+    const added = r.results.reduce((n, x) => n + x.added, 0);
+    alert(`Done — ${added} new match(es) added to the watchlist.`);
+    loadSearches();
+  } catch (e) { alert(e.message); }
+  btn.disabled = false; btn.textContent = 'Run all now';
+}
+
+async function runOneSearch(id, btn) {
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    const r = await api('/api/searches/' + id + '/run', {method: 'POST'});
+    alert(r.error ? r.error : `${r.added} new match(es) added.`);
+    loadSearches();
+  } catch (e) { alert(e.message); }
+  btn.disabled = false; btn.textContent = 'Run now';
+}
+
+async function toggleSearch(id, active) {
+  await api('/api/searches/' + id, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({active: active === 'true' || active === true})});
+  loadSearches();
+}
+
+async function deleteSearch(id) {
+  if (!confirm('Delete this saved search? (Already-added cars stay in the watchlist.)')) return;
+  await api('/api/searches/' + id, {method: 'DELETE'});
+  loadSearches();
+}
+
+async function importCsv(btn) {
+  const f = $('csvFile').files[0];
+  if (!f) { $('csvMsg').innerHTML = '<span class="warn">Choose a CSV file first.</span>'; return; }
+  btn.disabled = true; btn.textContent = 'Importing…';
+  try {
+    const fd = new FormData();
+    fd.append('file', f);
+    const r = await api('/api/import/copart', {method: 'POST', body: fd});
+    if (r.error) { $('csvMsg').innerHTML = `<span class="warn">${esc(r.error)}</span>`; }
+    else {
+      $('csvMsg').innerHTML = `<span class="pos">${r.rows_parsed} rows parsed · ${r.matched} matched your searches · <b>${r.added} added</b> · ${r.skipped_seen} already seen.</span>`
+        + (r.added_cars.length ? `<div class="muted" style="margin-top:4px">${r.added_cars.map(esc).join(' · ')}</div>` : '');
+    }
+  } catch (e) { $('csvMsg').innerHTML = `<span class="neg">${esc(e.message)}</span>`; }
+  btn.disabled = false; btn.textContent = 'Import CSV';
+}
+
+async function fetchValue(id, btn) {
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    const r = await api('/api/cars/' + id + '/fetch_value', {method: 'POST'});
+    if (!r.ok) alert(r.error);
+    else { await loadCars(); return; }
+  } catch (e) { alert(e.message); }
+  btn.disabled = false; btn.textContent = '⟳ comps';
+}
+
+async function setStatus(id, status) {
+  await api('/api/cars/' + id, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status})});
+  await loadCars();
+}
+
+/* ---------- ranking ---------- */
+async function loadRanking() {
+  const cars = await api('/api/ranking');
+  $('emptyRank').style.display = cars.length ? 'none' : '';
+  $('rankList').innerHTML = cars.map((c, i) => {
+    const m = c.metrics, v = VERDICTS[m.verdict] || VERDICTS.no_bid_set;
+    return `<div class="rank-card" onclick="switchTab('watchlist');toggleDetail(${c.id})">
+      <div class="rank-num">#${i + 1}</div>
+      <div class="rank-main">
+        <div class="rank-title">${c.year || ''} ${esc(c.make)} ${esc(c.model)} <span class="muted">${esc(c.trim)}</span></div>
+        <div class="rank-sub">${esc(META.damage_types[c.damage_type] || '')} · ${esc(META.platforms[c.platform] || '')} · <span class="chip ${c.status}">${c.status}</span></div>
+        <div class="verdict ${v[1]}" style="margin-top:4px">${v[0]}</div></div>
+      <div class="rank-stat"><div class="v">${m.margin_pct != null ? m.margin_pct + '%' : '—'}</div><div class="k">margin</div></div>
+      <div class="rank-stat"><div class="v">${m.margin != null ? fmt(m.margin) : '—'}</div><div class="k">est. profit</div></div>
+      <div class="rank-stat"><div class="v">${m.all_in ? fmt(m.all_in.total) : '—'}</div><div class="k">all-in</div></div>
+      <div class="rank-stat"><div class="v pos">${m.max_bid != null ? fmt(m.max_bid) : '—'}</div><div class="k">max bid</div></div>
+    </div>`;
+  }).join('');
+}
+
+/* ---------- quick calc ---------- */
+async function runQuickCalc() {
+  const contingencies = {};
+  for (const k of Object.keys(META.contingencies)) contingencies[k] = $('qc_' + k).checked;
+  const p = {
+    platform: $('qcPlatform').value, title_type: $('qcTitle').value, damage_type: $('qcDamage').value,
+    bid: +$('qcBid').value || 0, clean_value: +$('qcClean').value || 0,
+    repair_estimate: +$('qcRepair').value || 0, transport_estimate: +$('qcTransport').value || 0,
+    target_ratio: +$('qcRatio').value, rebuilt_factor: 0.7, contingencies,
+  };
+  const r = await api('/api/calc', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(p)});
+  const feeLines = r.fees ? r.fees.items.map(([l, a]) => `<div class="line"><span class="muted">${esc(l)}</span><span class="money">${fmtC(a)}</span></div>`).join('') + `<div class="line total"><span>Fees total</span><span class="money">${fmtC(r.fees.total)}</span></div>` : '<div class="muted">Enter a bid to see fees.</div>';
+  $('qcResult').innerHTML = `<div class="detail-grid" style="padding:0">
+    <div class="card"><h4>Fee stack</h4>${feeLines}</div>
+    <div class="card"><h4>Result</h4>
+      ${r.budget_ceiling != null ? `<div class="line"><span class="muted">Budget ceiling</span><span class="money">${fmt(r.budget_ceiling)}</span></div>` : ''}
+      ${r.rebuilt_resale != null ? `<div class="line"><span class="muted">Est. rebuilt resale</span><span class="money">${fmt(r.rebuilt_resale)}</span></div>` : ''}
+      ${r.all_in ? `<div class="line"><span class="muted">All-in cost at your bid</span><span class="money">${fmt(r.all_in.total)}</span></div>` : ''}
+      ${r.max_bid != null ? `<div class="line total"><span>MAX BID</span><span class="money pos">${fmt(r.max_bid)}</span></div>` : ''}
+      ${r.margin != null ? `<div class="line total"><span>Margin</span><span class="money ${r.margin >= 0 ? 'pos' : 'neg'}">${fmt(r.margin)} (${r.margin_pct}%)</span></div>` : ''}
+      ${r.damage_warning ? `<div class="warn" style="margin-top:8px;font-size:12px">⚠ ${esc(r.damage_warning)}</div>` : ''}
+    </div></div>`;
+}
+
+/* ---------- modal ---------- */
+function openModal(id) {
+  editingId = id || null;
+  $('modalTitle').textContent = id ? 'Edit Car' : 'Add Car';
+  $('deleteBtn').style.display = id ? '' : 'none';
+  $('lookupMsg').textContent = '';
+  const c = id ? CARS.find(x => x.id === id) : null;
+  const g = (v, d) => v != null && v !== '' ? v : (d ?? '');
+  $('f_vin_lookup').value = ''; $('f_lot_lookup').value = '';
+  $('f_year').value = g(c?.year); $('f_make').value = g(c?.make); $('f_model').value = g(c?.model);
+  $('f_trim').value = g(c?.trim); $('f_vin').value = g(c?.vin); $('f_lot').value = g(c?.lot_number);
+  $('f_source').value = g(c?.source, 'copart'); $('f_title').value = g(c?.title_type, 'salvage');
+  $('f_damage').value = g(c?.damage_type, 'other'); $('f_rundrive').value = c ? (c.run_drive ? '1' : '0') : '1';
+  $('f_date').value = c?.auction_date ? c.auction_date.slice(0, 16) : '';
+  $('f_location').value = g(c?.location); $('f_url').value = g(c?.listing_url);
+  $('f_platform').value = g(c?.platform, 'copart_public');
+  $('f_current').value = g(c?.current_bid || ''); $('f_planned').value = g(c?.planned_bid || '');
+  $('f_clean').value = g(c?.clean_value || ''); $('f_repair').value = g(c?.repair_estimate || '');
+  $('f_transport').value = g(c?.transport_estimate || '');
+  $('f_ratio').value = g(c?.target_ratio, 0.5); $('f_rebuilt').value = g(c?.rebuilt_factor, 0.7);
+  $('f_notes').value = g(c?.notes);
+  for (const k of Object.keys(META.contingencies)) $('fc_' + k).checked = !!(c?.contingencies?.[k]);
+  $('overlay').classList.add('open');
+}
+function closeModal() { $('overlay').classList.remove('open'); }
+
+async function doLookup() {
+  const vin = $('f_vin_lookup').value.trim(), lot = $('f_lot_lookup').value.trim();
+  if (!vin && !lot) { $('lookupMsg').innerHTML = '<span class="warn">Enter a VIN or lot #.</span>'; return; }
+  $('lookupMsg').textContent = 'Fetching…';
+  try {
+    const q = vin ? 'vin=' + encodeURIComponent(vin) : 'lot=' + encodeURIComponent(lot) + '&source=' + $('f_source_lookup').value;
+    const r = await api('/api/lookup?' + q);
+    if (!r.found) { $('lookupMsg').innerHTML = `<span class="warn">${esc(r.error || 'Not found')}</span>`; return; }
+    const c = r.car;
+    const set = (id, v) => { if (v != null && v !== '') $(id).value = v; };
+    set('f_year', c.year); set('f_make', c.make); set('f_model', c.model); set('f_trim', c.trim);
+    set('f_vin', c.vin); set('f_lot', c.lot_number); set('f_source', c.source);
+    set('f_title', c.title_type); set('f_damage', c.damage_type);
+    if (c.run_drive != null) $('f_rundrive').value = c.run_drive ? '1' : '0';
+    if (c.auction_date) $('f_date').value = String(c.auction_date).slice(0, 16);
+    set('f_location', c.location); set('f_url', c.listing_url);
+    set('f_current', c.current_bid); set('f_clean', c.clean_value);
+    $('lookupMsg').innerHTML = `<span class="pos">Loaded from ${r.provider} ✓ — review fields, add repair estimate & planned bid.</span>`;
+  } catch (e) { $('lookupMsg').innerHTML = `<span class="neg">${esc(e.message)}</span>`; }
+}
+
+function collectForm() {
+  const contingencies = {};
+  for (const k of Object.keys(META.contingencies)) contingencies[k] = $('fc_' + k).checked;
+  return {
+    year: +$('f_year').value || null, make: $('f_make').value, model: $('f_model').value,
+    trim: $('f_trim').value, vin: $('f_vin').value, lot_number: $('f_lot').value,
+    source: $('f_source').value, title_type: $('f_title').value, damage_type: $('f_damage').value,
+    run_drive: $('f_rundrive').value === '1', auction_date: $('f_date').value,
+    location: $('f_location').value, listing_url: $('f_url').value,
+    platform: $('f_platform').value, current_bid: +$('f_current').value || 0,
+    planned_bid: +$('f_planned').value || 0, clean_value: +$('f_clean').value || 0,
+    repair_estimate: +$('f_repair').value || 0, transport_estimate: +$('f_transport').value || 0,
+    target_ratio: +$('f_ratio').value, rebuilt_factor: +$('f_rebuilt').value,
+    contingencies, notes: $('f_notes').value,
+  };
+}
+
+async function saveCar() {
+  const body = JSON.stringify(collectForm());
+  const opts = {headers: {'Content-Type': 'application/json'}, body};
+  try {
+    if (editingId) await api('/api/cars/' + editingId, {...opts, method: 'PATCH'});
+    else await api('/api/cars', {...opts, method: 'POST'});
+    closeModal(); await loadCars();
+  } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+async function deleteCar() {
+  if (!editingId || !confirm('Delete this car?')) return;
+  await api('/api/cars/' + editingId, {method: 'DELETE'});
+  closeModal(); await loadCars();
+}
+
+function esc(s) { return s == null ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escAttr(s) { return esc(s); }
+
+init();
+</script>
+</body>
+</html>
