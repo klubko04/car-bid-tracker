@@ -1,0 +1,5 @@
+{
+  "python.terminal.activateEnvironment": true,
+  "files.eol": "\n",
+  "editor.formatOnSave": true
+}

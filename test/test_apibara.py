@@ -2,20 +2,25 @@
 Apibara live test — 2 searches, 2 API calls total (of your 100/mo).
 Standard library only (no httpx/requests/dotenv) — runs on any Python.
 
-Run:
-    python test_apibara.py
+Run (from anywhere; paths resolve off this file's location):
+    python test/test_apibara.py
 
-Reads APIBARA_API_KEY from .env, runs:
+Reads APIBARA_API_KEY from the repo-root .env, runs:
   1) Lexus IS 350, 2016-2020
   2) Audi A4,      2016-2020
 prints what each lot exposes (live bid, damage, title, odometer, etc.),
-and saves the full raw JSON to apibara_test_results.json.
+and saves the full raw JSON to test_run/apibara_test_results.json.
 """
 import json
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent   # repo root
+ENV_PATH = ROOT / ".env"
+OUT_DIR = ROOT / "test_run"
 
 BASE = "https://apibara.tech/api/v1/vehicle-auction"
 PER_PAGE = 10  # results per search; still 1 call regardless (max 20)
@@ -28,7 +33,7 @@ SEARCHES = [
 ]
 
 
-def read_env_key(path=".env", name="APIBARA_API_KEY"):
+def read_env_key(path=ENV_PATH, name="APIBARA_API_KEY"):
     if not os.path.exists(path):
         return ""
     with open(path, encoding="utf-8") as f:
@@ -91,7 +96,7 @@ def show_vehicle(v, i):
 def main():
     api_key = read_env_key()
     if not api_key:
-        raise SystemExit("No APIBARA_API_KEY found in .env")
+        raise SystemExit(f"No APIBARA_API_KEY found in {ENV_PATH}")
 
     out = {"searches": []}
     calls = 0
@@ -113,10 +118,12 @@ def main():
             show_vehicle(v, i)
         out["searches"].append({"label": s["label"], "params": params, "raw": data})
 
-    with open("apibara_test_results.json", "w", encoding="utf-8") as f:
+    OUT_DIR.mkdir(exist_ok=True)
+    out_path = OUT_DIR / "apibara_test_results.json"
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
     print("\n" + "=" * 70)
-    print(f"Done. {calls} API call(s) used. Raw JSON saved to apibara_test_results.json")
+    print(f"Done. {calls} API call(s) used. Raw JSON saved to {out_path}")
     print("Send me that file and I'll lock the field mapping to the real data.")
 
 

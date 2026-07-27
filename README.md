@@ -58,6 +58,46 @@ In any car's detail view, the **⟳ comps** button fetches the median asking pri
 
 All figures are estimates — platforms change fees; verify before bidding. Every bid is a binding contract (Copart relist penalty: max($600, 10%); IAAI: max($1,000, 15%)).
 
+## API probe scripts (`test/`)
+
+`test/*.py` are **not** unit tests — there is no test suite. They are standalone, stdlib-only
+scripts that make **live** Apibara calls to pin down the API's real field shapes, and write raw
+JSON to `test_run/` (gitignored). Each burns 1–2 of the 100/month free-plan budget, so the cost is
+stated in every docstring. They import nothing from `app/` and resolve `.env` / `test_run/` off
+their own file location, so they run from any working directory.
+
+```bash
+python test/test_apibara.py                 # 2 calls — original probe: Lexus IS 350 + Audi A4
+python test/test_apibara_search01.py        # 2 calls — Lexus ES 350 + Audi S5, per_page=20
+python test/test_apibara_history01.py       # 1-2 calls — prior auction runs for one VIN
+
+./test/run_sold.sh iaai                     # 1 call  — sold IAAI lots + IAAI-only filters
+./test/run_sold.sh copart                   # 1 call  — sold Copart lots
+./test/run_sold.sh generic                  # 2 calls — ended lots + one /history lookup
+./test/run_sold.sh all                      # 4 calls — all three
+```
+
+`run_sold.sh` prints the quota cost and asks for confirmation before spending anything.
+
+Server-side filters live in a `PARAMS` / `SEARCHES` constant at the top of each script;
+client-side filters (`BODY_STYLES`, `EXCLUDE_DAMAGE`, `SELLER_TYPES`) are separate constants,
+because Apibara has **no body-style parameter** and its `damage` filter is include-only with an
+enum that cannot express collision damage. Sold/ended lots come from `lot_sub_status=Ended`
+(*not* `lot_status`, which only accepts `All` / `Timed` / `Buy Now`).
+
+What these scripts established, verified against 60 live records:
+
+- **Prior sale attempts** are not in the search payload — only a single `last_sold_*` snapshot.
+  Full run history needs `GET /vehicles/{VIN}/history` (bare VIN or lot number, **not** the
+  record's `slug_vin`), 1 call per VIN, returning `{platform, date, price, status}` per run.
+- **`status` is a bid outcome, not a transaction.** `"Sold on Approval"` means the high bid missed
+  the seller's reserve. Lots marked `"Sold"` demonstrably relist afterwards.
+- **Reserve prices are not published** by any field; they can only be bounded from history
+  (on-approval rows sit below the reserve).
+- **IAAI records are far richer than Copart's**: `ActualCashValue` (27/27), `EstimatedRepairCost`
+  (17/27), `body_style` (27/27) and a pre-bidder count all come from IAAI's `details` block.
+  Copart records have **no `details` block at all**.
+
 ## Files
 
 - `main.py` — FastAPI app + routes
@@ -69,3 +109,5 @@ All figures are estimates — platforms change fees; verify before bidding. Ever
 - `app/auction_api.py` — demo lookup fallback
 - `app/db.py` — SQLite storage (`tracker.db`)
 - `static/index.html` — the UI
+- `test/` — live API probe scripts + `run_sold.sh` (see above); `test_run/` holds their JSON output
+- `.cc-discussion/` — session logs from Claude Code work, written for Obsidian

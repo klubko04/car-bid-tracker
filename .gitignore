@@ -7,8 +7,8 @@
 *.db
 tracker.db
 
-# Test/scratch artifacts
-apibara_test_results.json
+# Test/scratch artifacts — live API responses written by test/*.py
+test_run/
 
 # Python
 __pycache__/

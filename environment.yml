@@ -1,0 +1,6 @@
+name: carbid
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+prefix: /home/striker/.conda/envs/carbid
