@@ -3,7 +3,7 @@ title: Analyze car API architecture and endpoint flow
 project: car-bid-tracker
 tool: Claude Code (Opus 5)
 started: 2026-07-26
-updated: 2026-07-27
+updated: 2026-08-05
 status: ongoing
 type: chat-transcript
 tags: [car-bid-tracker, apibara, copart, iaai, salvage-auction, api-research, fastapi]
@@ -965,8 +965,35 @@ a memory noting the `.cc-discussion` convention for future sessions.
 
 ### Response
 
-Rewrote this file as a flat chronological transcript — every user prompt verbatim, each response's
-substance, and the artifacts produced per turn. This is that file.
+Rewrote this file as a flat chronological transcript, in two passes (`Write` for prompts 1–10,
+shell heredoc append for 11–20 + appendices) to avoid truncation on a single long write.
+Result at that point: **1,030 lines, 20 prompts**.
+
+**Structure.** Each turn is `## Prompt N — <topic>`, with the prompt quoted verbatim — typos
+intact, including the IDE selections that accompanied prompts 10 (`WAUP4AF57JA002929`), 14
+(`WAUR4AF55KA050844`) and 19 — then `### Response` carrying that turn's actual content: tables,
+field-coverage counts, code snippets, conclusions.
+
+**Deliberately preserved rather than smoothed over:**
+
+- **The two corrections**, marked as callouts where they happened — the premise correction in
+  Prompt 3 (`app/` modules aren't stubs) and the `bidCountText` correction in Prompt 14 that
+  reverses Prompt 10. The wrong claim stays in Prompt 10 with a pointer forward, so the reasoning
+  trail stays honest.
+- **The dismissed question** in Prompt 8 — recorded as asked and dismissed, not silently dropped.
+- **The evidence caveats** — API Auctions returning 403 to every fetch, and the ⚠️ cells that flags.
+- **The `/history` 404** in Prompt 6 as a mistake made and fixed in Prompt 7, rather than presented
+  as a clean discovery.
+
+**One judgment call, flagged at the time:** the full source of the six Python scripts was *not*
+inlined. They live in the repo at the paths in the artifacts index, and duplicating ~900 lines of
+Python would drift out of sync the moment any script changed. What *is* inlined: the diff for
+`search01`, the key config blocks, and every design decision behind them. Offered `<details>`
+blocks as the alternative if full bodies are wanted.
+
+Tail sections added: artifacts index (file → turn → purpose), open-threads checklist, the six open
+bugs, and sources. Frontmatter `updated:` kept current, with a commitment to append as the session
+continues.
 
 ---
 
@@ -987,6 +1014,7 @@ Files created or modified during this session, in creation order:
 | `test/run_sold.sh` | 19 | Confirmation-gated runner |
 | `README.md` | 19 | API probe scripts section |
 | `.cc-discussion/` + this file | 19, 20 | Session transcript for Obsidian |
+| `test/test_apibara_sold_iaai_02.py` | 23 | Control test: server-side `zip`+`radius` vs client-side coords |
 
 Raw API output (gitignored, in `test_run/`): `apibara_test_results_search01.json` (40 live lots),
 `apibara_sold_results01.json` (20 ended lots), `apibara_history_results01.json` (4 runs, 1 VIN).
@@ -1004,6 +1032,17 @@ here, to avoid drift.
 - [ ] Decide on the $25 Apibara Basic upgrade
 - [ ] Probe API Auctions with a demo token to replace the ⚠️ cells in Prompt 17
 - [ ] `conftest.py` with `collect_ignore_glob = ["*"]` in `test/` if pytest is ever added
+- [x] ~~Run `test/test_apibara_sold_iaai_02.py`~~ — **done, Prompt 24: server-side filtering is
+      UNUSABLE** (1 of 15 lots survived; both 15-mile Seattle lots dropped)
+- [ ] **BUG:** `_build_params()` emits `zip`/`radius` — any saved search with a ZIP silently
+      returns a near-empty result set
+- [ ] Build `app/geo.py` (haversine + branch-coord cache) once that verdict is in
+- [ ] **BUG:** `run_drive` mis-set on Copart — `"ENHANCED VEHICLES"` (8/20) and
+      `"ENGINE START PROGRAM"` both evaluate False, wrongly triggering the non-runner contingency
+- [ ] Confirm `/history` works for Copart lots (1 call)
+- [ ] Body style for Copart via NHTSA vPIC VIN decode (free, keyless)
+- [ ] Lean on `app/copart_csv.py` for Copart ACV/repair — the IAAI `details` equivalent
+- [ ] Evaluate `/vehicles/{VIN}/shipping` for a dollar `transport_estimate` (Seattle port proxy)
 
 ### Bugs found, all still open
 
@@ -1028,3 +1067,396 @@ here, to avoid drift.
 - [Vehicle Databases — auction history](https://vehicledatabases.com/api/auction-history)
 - [Rebrowser — IAAI dataset](https://rebrowser.net/products/datasets/iaai)
 - [cardatabases.com](https://cardatabases.com/api/auction-data) (marked "Coming Soon")
+
+---
+
+## Prompt 21 — road distance to Federal Way
+
+> just run sold Iaai test script - another key point need to extraxt and triangulate to find out the road distance for lot transportaion purpose from lot storage location to Federal Way, WA 98003 zip
+> lets analyze apibara_sold_iaai_01.json
+> pls propose solution to address it based on apibara_sold_iaai_01.json output
+
+### Response
+
+The `2026-04-20` → `2026-05-11` window **did** return data — 15 records after client-side
+`BODY_STYLES=["Coupe"]` and `EXCLUDE_DAMAGE` filtering. Coordinates are already in the payload.
+
+**What the file actually gives you:**
+
+| Field | Coverage | Value |
+|---|---|---|
+| `details.attributes.StorageLocationLatitude` / `Longitude` | **15/15** | real coords, e.g. `47.11197 / -122.28220` |
+| `details.attributes.StorageLocationBranch` | 15/15 | branch no. — **12 unique across 15 lots** |
+| `location.display` | 15/15 | `Seattle (WA)`, `Austin (TX)` |
+| `location.send_from` | 15/15 | export **port**: Seattle, LA, Houston, Chicago, NY, Norfolk, Savannah |
+| `sale_information.VehiclesVehicleLocation` | offsite lots | **full street address** for offsite/Dream Rides lots |
+| top-level `facility` `{id,state,zip,lat,lng}` | **1/15** | essentially always null |
+| top-level `distance` | **0/15** | null, and undocumented in the spec |
+
+The useful geo lives in the **IAAI `details` block**, not the fields the names suggest.
+
+Great-circle from those coords to Federal Way (47.3223, −122.3126):
+
+```
+       lot  branch   great-circle   ~road (×1.2)  location
+  44767060     327          15 mi         18 mi   Seattle (WA)
+  44316625     342         660 mi        792 mi   Salt Lake City (UT)
+  44880113     128         914 mi       1096 mi   Santa Clarita (CA)
+  43695394     374        1009 mi       1211 mi   Denver East (CO)
+  43475591     421        1513 mi       1816 mi   Oklahoma City (OK)
+  43493304     418        1775 mi       2130 mi   Austin (TX)
+  43914662     705        2182 mi       2619 mi   Atlanta South (GA)
+  44477751     745        2511 mi       3014 mi   Dream Rides (Clearwater FL)
+```
+
+**Proposed solution — three layers, cheapest first:**
+
+*Layer 1 — filter by proximity at search time (free, currently unused).* `/vehicles` accepts
+`zip` + `radius` + `units`. Adding `zip=98003&radius=500&units=mi` restricts results *before*
+they're returned. `_build_params()` in `app/apibara.py` already emits these from a saved search;
+the probe scripts just don't set them.
+
+*Layer 2 — distance from embedded coords (free, offline).* Haversine → × road factor (~1.2).
+Cache keyed on `StorageLocationBranch`, not lot — 12 unique branches served 15 lots, and IAAI has
+only ~200 branches total. **Copart gap:** no `details` block ⇒ no coords; fix via the `/locations`
+endpoint (`platform, facility_id, name, city, state, zip, latitude, longitude`), pulled once and
+cached, since branches essentially never move.
+
+*Layer 3 — real dollars via `/vehicles/{VIN}/shipping`.* The calculator wants a **dollar** figure,
+not a distance — `transport_estimate` feeds straight into `find_max_bid()` and is currently manual.
+That endpoint returns `{port, price, currency}`, and the documented port list is exactly the values
+seen in `send_from`: **Chicago, NY, Miami, Savannah, Norfolk, Houston, LA, Seattle**. Federal Way
+is ~25 mi from the Seattle port, so the quoted auction→Seattle price is a strong proxy with no
+$/mile model to calibrate. 1 call per VIN ⇒ on-demand action, not scanner work.
+
+**Recommended build:** add `zip`/`radius` to the probe `PARAMS`; create `app/geo.py` (haversine +
+`BRANCH_COORDS` cache keyed by `(platform, branch_id)`, stdlib only); surface `distance_mi` in
+`normalize_record()`; add `apibara.shipping(vin)` + a per-car button.
+
+Caveat stated plainly: ×1.2 is a heuristic, not a measurement. True road miles need a routing
+service (OSRM public demo — free, keyless, no SLA; OpenRouteService — 2,000/day free key). Both fit
+behind the same `geo.py` interface, and branch-level caching means one call per *branch*, not per lot.
+
+---
+
+## Prompt 22 — how does zip+radius work?
+
+> pls outline the logic how params in "/vehicles with zip + radius + units" works? is it IAAI attribute or it is calcs on apibara side
+> what would be the difference from using distance from embedded coords StorageLocationLatitude/Longitude
+
+### Response
+
+**It's computed on Apibara's side, not an IAAI attribute.** Three proofs from the data:
+
+**1. Coordinates match exactly, IDs come from different layers.** IAAI lot `41363284`:
+
+```
+facility:                      {"id": 151, "zip": "85041", "lat": 33.40571, "lng": -112.10738}
+details.attributes:  StorageLocationBranch=151, lat=33.40571, lng=-112.10738
+```
+
+`facility.id` **is** IAAI's branch number and coords are identical to the decimal — Apibara joins
+its own branch table onto the lot using IAAI's branch ID as key.
+
+**2. `facility` carries a ZIP that IAAI never provides.** `85041`, `80022`, `36613` appear in
+`facility.zip`; `details.attributes` has no zip field at all, only lat/lng.
+
+**3. Copart lot `75960155` has `facility` populated and no `details` block whatsoever.** An IAAI
+attribute cannot exist on a Copart record — conclusive.
+
+Two strata in the payload:
+
+| Layer | Naming | Origin |
+|---|---|---|
+| `details.attributes.*` — `StorageLocationLatitude`, `DisplayLaneRunDateTime`, `SalvageId` | PascalCase | **raw IAAI passthrough** |
+| `location`, `facility`, `distance` | snake_case | **Apibara's normalized layer** |
+
+**Mechanism:** geocode the zip → measure to each lot's *facility* coords → keep what's inside the
+radius, in `mi` or `km`. The top-level `distance` is that computation's per-record output — null on
+all 75 records because **no search had ever passed a `zip`**. Not a broken field, an unpopulated
+one. `/locations` is the same table exposed directly.
+
+**Difference from embedded coords:**
+
+| | **zip + radius** (Apibara-side) | **StorageLocation lat/lng** (client-side) |
+|---|---|---|
+| Who computes | Apibara | you |
+| **When filtered** | **before the 20-lot page is assembled** | after — far lots still consume page slots |
+| Platform coverage | both — it's Apibara's layer | **IAAI only** (0/33 Copart) |
+| Observed population | `facility.lat` set on **3 of 75** (4%) | **35/35** IAAI records (100%) |
+| Gives a ZIP | yes | no, coords only |
+| Distance type | almost certainly great-circle | great-circle (your choice) |
+
+**Neither gives road distance** — a radius filter is geometric by definition. The ×1.2 factor stays
+a heuristic either way.
+
+**The quota difference is the real point.** At `MAX_PAGES=1` a search returning 15 Florida cars and
+2 Seattle cars costs a full call for 2 useful rows. Server-side, all 20 slots come back pre-filtered.
+
+**Unverifiable from outside:** `facility` is populated on only 4% of records. If the radius filter
+joins against that same sparse data it would silently drop nearby lots — false negatives you'd
+never see. But response sparseness ≠ index sparseness; the serializer may just omit it. Proposed a
+**1-call control test**: same search + `zip=98003&radius=3000&units=mi`. 3000 mi covers the lower
+48, so the correct answer is the same ~15 lots. ~15 back ⇒ index complete, filtering safe. 1–3 back
+⇒ join is sparse, client-side only.
+
+---
+
+## Prompt 23 — create the control test
+
+> yes pls create test_apibara_sold_iaai_02.py with those three params set
+> do not forget to update "Analyze car API architecture and endpoint flow.md" each prompt run (you need to catch up with 2 prior prompts to add to .md)
+> reminder: .md file should be flat full chat history discussion (no summary) including user prompts and generated artifacts
+
+### Response
+
+**Artifact: `test/test_apibara_sold_iaai_02.py`** — control test, 1 call. Identical `PARAMS` to
+`_01` plus the three under test:
+
+```python
+PARAMS = {
+    "platform": "iaai", "make": "Audi", "model": "S5",
+    "year_from": 2018, "year_to": 2023,
+    "lot_sub_status": "Ended",
+    "auction_date_from": "2026-04-20", "auction_date_to": "2026-05-11",
+    "per_page": 20,
+    # --- the three under test ---
+    "zip": "98003",
+    "radius": 3000,
+    "units": "mi",
+}
+```
+
+Built as a purpose-made experiment rather than a copy of `_01`:
+
+- **Auto-diffs against the baseline** — loads `test_run/apibara_sold_iaai_01.json`, compares lot
+  numbers, and reports `DROPPED` / `NEW` sets.
+- **Prints a verdict** — *no lots dropped* ⇒ index complete, server-side filtering safe;
+  *≤3 returned* ⇒ join is sparse, `zip`+`radius` unusable; *partial loss* ⇒ treat any
+  proximity-filtered result as a floor, not a complete set.
+- **Reports whether `distance` and `facility.lat` populate** once a zip is supplied — both were
+  null on all 75 records pulled so far.
+- **Shows API distance beside locally computed haversine and ~road miles**, plus which layer the
+  coords came from (`details.attributes` vs `facility` vs `none`), so the two methods can be
+  compared directly on the same lots.
+- Handles 422 explicitly (would mean one of `zip`/`radius`/`units` was rejected).
+
+Verified without spending a call: syntax parses, module loads from `/tmp`, `.env` key found,
+baseline diff reads all 15 lots, haversine returns 14.6 mi for the Seattle branch.
+
+Run:
+
+```bash
+conda activate carbid
+python test/test_apibara_sold_iaai_02.py
+```
+
+Also noted: this file is now maintained as a running flat transcript, updated every prompt.
+
+---
+
+## Prompt 24 — control test result + which approach to trust
+
+> pls focus on "Analyze car API architecture and endpoint flow.md" update on each prompt run (you need to fix Prompt 20 which doesn't have a full chat output and to catch up with Prompt 21-23 run today and this one Prompt 24 to add to .md
+> reminder: .md file should be flat full chat history discussion (no summary) including user prompts and generated artifacts
+> analyze of iaai_02: here is cli output>
+> ```
+> CONTROL TEST — server-side proximity filter (zip=98003, radius=3000 mi)
+>   returned 1 lot(s)   (more pages: False)
+>   top-level `distance` populated: 1/1
+>   `facility.lat` populated:       1/1
+>
+>          lot  branch  API dist  haversine   ~road  source            location
+>     43695394     374   1008.82     1009 mi   1211 mi  details.attributes Denver East (CO)
+>
+>   BASELINE (_01, no proximity params): 15 lot(s)
+>   THIS RUN (radius=3000 mi):           1 lot(s)
+>   DROPPED by the filter (14): ['43475591', '43493304', '43914662', '44316625', '44477751',
+>     '44487434', '44523529', '44587594', '44597230', '44628609', '44667864', '44767060',
+>     '44797851', '44880113']
+>
+>   VERDICT: Nearly everything dropped -> the radius filter joins against the
+>     same sparse facility data seen in responses. zip+radius is UNUSABLE
+> ```
+> pls assess what would be the better and more reliable approach
+> i) using apibara full pull (no params) and calc distance
+> ii) rely on apibara distant params
+
+### Response
+
+**Verdict: (i), and it isn't close.** The control test didn't just show the filter is incomplete —
+it showed it fails hardest on exactly the lots that matter most.
+
+**The smoking gun.** The single surviving lot, `43695394` Denver East, is *precisely* the one
+record in the baseline that had `facility.lat` populated:
+
+```
+in baseline _01, which lots had facility.lat set?
+  43695394  Denver East (CO)   <-- the only one, and the only survivor
+```
+
+`facility` is the join. No facility row ⇒ invisible to `zip`+`radius`. 1 of 15 survived because
+1 of 15 had the join.
+
+**It drops the nearest lots.** Sorted by true distance, the 14 dropped lots begin:
+
+```
+     15 mi  44767060  Seattle (WA)     <-- 15 miles from Federal Way, DROPPED
+     15 mi  44797851  Seattle (WA)     <-- DROPPED
+    660 mi  44316625  Salt Lake City (UT)
+    660 mi  44523529  Salt Lake City (UT)
+    914 mi  44880113  Santa Clarita (CA)
+   1513 mi  43475591  Oklahoma City (OK)
+```
+
+A proximity filter that discards two lots **15 miles away** while keeping one **1,009 miles away**
+is worse than no filter — it is silently, confidently wrong, with no error and no warning. Had the
+radius been 500 mi instead of 3000, the result would have been *zero lots* and the natural reading
+would have been "no Audi S5s near Seattle", which is false.
+
+**Secondary finding — Apibara's distance is great-circle, confirmed empirically:**
+
+```
+API distance: 1008.82 mi      local haversine: 1009 mi      delta: <0.2 mi
+```
+
+So `distance` is **not** road distance. Even where the field works, it needs the same ×1.2 road
+factor as locally computed values — there is no accuracy advantage to the server-side number.
+
+**Assessment:**
+
+| | **(i) Full pull + local calc** | **(ii) Apibara `zip`+`radius`** |
+|---|---|---|
+| Correctness | coords on **35/35** IAAI records | join present on **3/75** (4%) |
+| Failure mode | none observed | **silent false negatives, worst when nearest** |
+| Coverage | IAAI only (needs `/locations` for Copart) | both platforms *in principle* |
+| Distance type | great-circle (×1.2 heuristic) | great-circle — **identical**, no gain |
+| Quota | 20 lots/page, filter after | would have saved page slots — but returns wrong lots |
+| Verifiable | yes, coords are inspectable | no, opaque server-side join |
+
+The one genuine advantage of (ii) — pre-filtering before the 20-lot page is assembled, which
+matters at `MAX_PAGES=1` — is worthless if the pre-filter drops the lots you want. Saving quota by
+discarding the two Seattle cars is a net loss.
+
+**Recommended architecture:** pull with **no proximity params**, compute distance client-side from
+`details.attributes.StorageLocationLatitude/Longitude`, cache by `StorageLocationBranch`
+(12 unique branches served 15 lots; IAAI has ~200 total). For Copart, pull `/locations` once and
+cache — that endpoint exposes Apibara's facility table directly, and building the branch table
+from it *proactively* is exactly what the sparse per-lot join fails to do.
+
+Corollary for the app: **do not set `zip`/`radius` on saved searches.** `_build_params()` in
+`app/apibara.py:182-185` emits them whenever a saved search has a zip — meaning any user who fills
+in the ZIP field today is silently getting a near-empty result set. That is now a **bug**, not an
+unused feature.
+
+Also updated in this turn: **Prompt 20 expanded** to carry its full response (transcript structure,
+what was deliberately preserved, the judgment call on not inlining script source) rather than the
+two-line placeholder it had.
+
+---
+
+## Prompt 25 — Copart vs IAAI data comparison
+
+> pls keep updating "Analyze car API architecture and endpoint flow.md" based on same principles
+>
+> compare apibara_sold_copart_01.json output with apibara_sold_iaai_01.json
+> build comparison table what kind of info is available on IAAI vs Copart
+> does Copart details allow to answer prior questons reviewed with IAAI json data - if not what would be the work around
+
+### Response
+
+Field-by-field diff across **20 Copart** and **15 IAAI** sold lots (same query shape, same date
+window `2026-04-20` → `2026-05-11`).
+
+### Availability comparison
+
+| Field | Copart | IAAI | Note |
+|---|---|---|---|
+| `pricing.last_sold_price_usd` | **20/20** | 15/15 | parity |
+| `pricing.current_bid_usd` | 20/20 | 14/15 | Copart keeps pre-sale bid *and* final price separately (only 7/20 identical; IAAI 2/15) |
+| `pricing.buy_now_usd` | 3/20 | 8/15 | offer-dependent, both |
+| `auction.last_sold_status` | 20/20 | 15/15 | Copart 11 Sold / **9 Sold on Approval**; IAAI 14 / 1 |
+| `condition.primary_damage` | 20/20 | 15/15 | parity |
+| `condition.secondary_damage` | **0/20** | 9/15 | ❌ Copart never populates |
+| `condition.run_condition` | 20/20 | 15/15 | **different vocabularies** |
+| `odometer.mi` | 20/20 (**3 are `0`**) | 15/15, none zero | Copart 15% junk |
+| `sale_document.name` | 20/20 | 15/15 | different vocabularies |
+| `seller.name` | 20/20 — *Geico, Farmers, USAA* | 15/15 — *Progressive, State Farm, Turo* | **Copart slightly better** (1 unknown vs 3) |
+| `vehicle_specs` engine/trans/drive/color | 20/20 | 15/15 | parity |
+| `vehicle_specs.body_style` | **0/20** | 15/15 | ❌ |
+| `vehicle_specs.airbags` | **0/20** | 15/15 | ❌ |
+| `media` thumbs/video/360 | 20/20 | 15/15 | parity |
+| **`details` block** | **`None` × 20** | dict × 15 | ❌ **root cause of everything below** |
+| `facility.lat` | 0/20 | 1/15 | ❌ both effectively useless |
+
+`details` isn't an empty dict on Copart — it is literally `None`. That single absence removes ACV,
+repair estimate, storage coordinates, branch ID, bidder counts and bid increment at once.
+
+### Does Copart answer the questions settled with IAAI?
+
+| Question (from this session) | Copart? | Workaround |
+|---|---|---|
+| Final sale price | ✅ yes | — |
+| Sold vs on-approval | ✅ yes | — |
+| Buy Now | ✅ same partial coverage | — |
+| Prior sale attempts | ⚠️ **untested** | `/history` takes VIN *or lot*, platform-agnostic — 1 call to confirm |
+| Reserve price | ❌ nothing (IAAI at least had junk `reserveMet`) | bound from `/history` on-approval rows — works for both |
+| Relist detection | ❌ heuristic needed `details.sale_information.AuctionDateTime` | `/history` run count — better anyway |
+| **Bidder count / bid increment** | ❌ **no substitute in Apibara** | none — it is IAAI's own pre-bid UI payload |
+| **Body style (coupe vs sedan)** | ❌ | **NHTSA vPIC VIN decode** — free, unlimited, no key |
+| **ACV / est. repair cost** | ❌ | **Copart member CSV** — `app/copart_csv.py` already parses `retail_value` + `repair_cost` |
+| **Storage coordinates** | ❌ | `/locations` — but see the join problem |
+| Secondary damage | ❌ | none |
+
+Copart is at **full parity on money and sale outcome**, and loses everything that depended on the
+`details` block.
+
+### Two Copart-specific defects found
+
+**1. `run_drive` is computed wrong.** The vocabularies are not comparable:
+
+```
+copart: RUNS AND DRIVES 10 | ENHANCED VEHICLES 8 | ENGINE START PROGRAM 1 | Unknown 1
+iaai:   RUNS AND DRIVES 11 | STATIONARY / NO INFORMATION 4
+```
+
+`normalize_record()` does `"run" in run_cond.lower()`. `"ENHANCED VEHICLES"` is a Copart *listing
+program*, not a condition — it says nothing about whether the car runs, yet **8 of 20 lots** get
+`run_drive=False`, triggering the $150 non-runner contingency. Worse, `"ENGINE START PROGRAM"`
+means the engine **did** start and also evaluates False. Only IAAI's
+`"STATIONARY / NO INFORMATION"` is a true negative.
+
+**2. `/locations` cannot be joined on Copart.** `facility.id` is null on all 20 and no branch
+number exists anywhere in the record, so the only join key is the display string `"Peoria (IL)"`
+→ `/locations.name`. Fragile, and sublots (`"Philadelphia East-sublot (PA)"`) will not match cleanly.
+
+**Also:** `pricing.estimated_cost` looks useful but is not — values like `$325 – $71,500` repeat
+verbatim across unrelated lots on **both** platforms. A generic widget range, not a per-lot
+estimate. Do not wire it to anything.
+
+### Title vocabularies (relevant to the open `_map_title` bug)
+
+```
+copart: CERT OF TITLE-SALVAGE 7 | SALVAGE CERTIFICATE 3 | CERTIFICATE OF SALVAGE 3 |
+        SALVAGE VEHICLE TITLE 1 | CERT OF TITLE-REBUILT SALVAGE 1 | PUBLIC - SALVAGE TITLE 1 |
+        CERTIFICATE OF DESTRUCTION 1 | BILL OF SALE 1 | CERT OF TITLE-REPOSSESSION 1 |
+        CERT OF TITLE SLVG REBUILDABLE 1
+iaai:   CLEAR 5 | SALVAGE 5 | BILL OF SALE 2 | SALVAGE - REPAIRABLE-COLLISION 1 |
+        ORIGINAL 1 | SALVAGE - BRANDED IF REBUILT 1
+```
+
+IAAI's `"CLEAR"` (5 records) *does* match `_map_title`'s `"clear"` needle and maps correctly to
+`clean`. `"ORIGINAL"` still does not. On Copart, `CERTIFICATE OF DESTRUCTION`, `BILL OF SALE` and
+`CERT OF TITLE-REPOSSESSION` are all materially different from a salvage title yet collapse to
+`salvage`.
+
+### Recommendation
+
+The strongest workaround is already in the repo: **`app/copart_csv.py` reads `retail_value` and
+`repair_cost` from the Copart member CSV** and pre-fills `clean_value` / `repair_estimate` — the
+exact equivalent of IAAI's `ActualCashValue` / `EstimatedRepairCost`, first-party, zero API quota.
+The architecture that falls out: **IAAI via API, Copart via CSV + API**, each source used where its
+data is actually complete.
+
+For body style, NHTSA vPIC (`https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/{vin}?format=json`)
+returns `BodyClass` and `Doors` free, no key, no rate limit, both platforms.
