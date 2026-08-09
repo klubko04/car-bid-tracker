@@ -10,6 +10,9 @@ tracker.db
 # Test/scratch artifacts — live API responses written by test/*.py
 test_run/
 
+# Downloaded auction photos + generated archive tree (app/image_pipeline.py)
+images/
+
 # Python
 __pycache__/
 *.pyc
