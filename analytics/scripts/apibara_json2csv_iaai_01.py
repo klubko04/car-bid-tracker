@@ -222,6 +222,53 @@ def _tenant(v):
     return _TENANT.get(ident.rsplit("~", 1)[-1].upper()) if "~" in ident else None
 
 
+
+# --------------------------------------------------------------------------
+# derived: IAA vehicle score band
+# --------------------------------------------------------------------------
+# IAA's own automated computer-vision assessment of visible damage severity,
+# from the check-in photos. Two things about it are easy to get backwards:
+# HIGHER IS BETTER (50 is the least damaged, 0 the worst), and it is NOT a
+# percentage of anything. Band names and boundaries are IAA's, from their score
+# flyer — kept verbatim rather than paraphrased so a row can be checked against
+# the official document.
+_SCORE_BANDS = (
+    (0, 9, "non-repairable"),
+    (10, 19, "severe damage"),
+    (20, 29, "major damage"),
+    (30, 39, "moderate damage"),
+    (40, 49, "minor damage"),
+    (50, 50, "little damage"),
+)
+
+
+def vehicle_score(v):
+    """IAA's 0-50 score as a number, or None when not assessed."""
+    raw = clean(attrs(v).get("VehicleGrade"))
+    if raw is None:
+        return None
+    try:
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def vehicle_score_band(v):
+    """-> IAA's band name, or '' when the lot carries no score.
+
+    Blank stays blank rather than collapsing into the worst band: "not assessed"
+    and "assessed as non-repairable" are opposite facts, and 209 of 2,679 rows
+    have no score at all.
+    """
+    n = vehicle_score(v)
+    if n is None:
+        return ""
+    for lo, hi, name in _SCORE_BANDS:
+        if lo <= n <= hi:
+            return name
+    return ""
+
+
 # --------------------------------------------------------------------------
 # derived: damage grouping
 # --------------------------------------------------------------------------
@@ -520,7 +567,10 @@ SCHEMA = [
     ("run_condition",       lambda v: g(v, "condition", "run_condition", "value"), "raw"),
     ("has_key",             lambda v: g(v, "condition", "has_key"),           "raw"),
     ("airbags",             lambda v: g(v, "vehicle_specs", "airbags"),       "raw"),
-    ("vehicle_grade",       lambda v: clean(attrs(v).get("VehicleGrade")),    "raw"),
+    # IAA's own photo-based damage score. Renamed from `vehicle_grade` because
+    # "grade" reads like a letter grade or a percentage and this is neither.
+    ("iaa_vehicle_score",   vehicle_score,                                    "raw"),
+    ("iaa_vehicle_score_band", vehicle_score_band,                            "calc"),
     ("odometer_mi",         lambda v: g(v, "odometer", "mi"),                 "raw"),
     ("sale_document",       lambda v: g(v, "sale_document", "name"),          "raw"),
     ("sale_document_group", lambda v: g(v, "sale_document", "sale_document_group"), "raw"),
@@ -779,7 +829,8 @@ SOURCE_HINTS = {
     "run_condition": "condition.run_condition.value",
     "has_key": "condition.has_key",
     "airbags": "vehicle_specs.airbags",
-    "vehicle_grade": "details.attributes.VehicleGrade",
+    "iaa_vehicle_score": "details.attributes.VehicleGrade — IAA photo score, 0-50, HIGHER IS BETTER",
+    "iaa_vehicle_score_band": "IAA band name for the score (non-repairable .. little damage)",
     "odometer_mi": "odometer.mi",
     "sale_document": "sale_document.name",
     "sale_document_group": "sale_document.sale_document_group",

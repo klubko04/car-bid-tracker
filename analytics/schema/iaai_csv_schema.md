@@ -583,6 +583,35 @@ field cannot recover what was searched**: a `2018 Audi RS 5` search came back
 `pull_images_01.py`'s model folder, cohort reasoning in `lot_history_01.py` —
 reads this rather than guessing.
 
+### IAA vehicle score
+
+IAA's own automated computer-vision assessment of visible damage severity, taken
+from the check-in photos. Two things are easy to get backwards:
+
+- **Higher is better.** 50 is the least damaged, 0 the worst.
+- **It is not a percentage** of anything.
+
+Renamed from `vehicle_grade`, which read like a letter grade or a proportion and
+is neither. The raw 0-50 value is retained; `iaa_vehicle_score_band` carries
+IAA's own band names, verbatim from their score flyer:
+
+| score | band | rows |
+|---|---|---|
+| 50 | `little damage` | 278 |
+| 40-49 | `minor damage` | 534 |
+| 30-39 | `moderate damage` | 661 |
+| 20-29 | `major damage` | 559 |
+| 10-19 | `severe damage` | 441 |
+| 0-9 | `non-repairable` | 97 |
+| *(blank)* | not assessed | 211 |
+
+Observed values are integers spanning the full 0-50 range, so the scale in the
+data matches the published one exactly.
+
+**Blank stays blank rather than collapsing into `non-repairable`.** "Not
+assessed" and "assessed as non-repairable" are opposite facts, and 211 of 2,781
+rows carry no score — folding them together would invent 211 write-offs.
+
 ### Damage grouping
 
 Two derived columns collapse IAAI's ~50 damage strings into the three buckets
@@ -640,7 +669,8 @@ row (FRONT 1200 -> 1201, OTHER 171 -> 170).
 | `run_condition` | raw | `condition.run_condition.value` | 70/70 |
 | `has_key` | raw | `condition.has_key` | 70/70 |
 | `airbags` | raw | `vehicle_specs.airbags` | 70/70 |
-| `vehicle_grade` | raw | `details.attributes.VehicleGrade` | 70/70 |
+| `iaa_vehicle_score` | raw | `details.attributes.VehicleGrade` | 2570/2781 |
+| `iaa_vehicle_score_band` | calc | IAA band name for the score | same |
 | `odometer_mi` | raw | `odometer.mi` | 70/70 |
 
 ### Title
@@ -1048,7 +1078,7 @@ python analytics/scripts/pull_images_01.py CUT.csv --dry-run
 Takes a csv-cut, applies extra filters, and downloads each lot's photos to
 
 ```
-images/open/{Make Model}/{FRONT|REAR-SIDE|OTHER}/{platform}/[{year}-][{dist}-]{lot}-{vin}[-${buynow}]/{lot}_001.jpg …
+images/open/{Make Model}/{FRONT|REAR-SIDE|OTHER}/{platform}/[{year}-][{dist}-]{lot}-{vin}[-{score}][-${buynow}]/{lot}_001.jpg …
 ```
 
 URLs are rebuilt from `iaai_image_url_prefix` + `iaai_image_keys`, so the CSV is
@@ -1068,9 +1098,9 @@ flat folder per lot and no taxonomy. The HTTP download is imported from
 ### The folder renames itself when the VIN resolves
 
 ```
-images/open/Audi A5/FRONT/iaai/2018-1250mi-45662018-WAUENCF51JA104260
-images/open/Audi A5/FRONT/iaai/2018-3000mi-45704693-WAUENCF5XJA060484-$7600
-images/open/Audi A5/FRONT/iaai/2021-0250mi-45354112-WAUDACF58MAxxxxxx-$6750
+images/open/Audi A5/FRONT/iaai/2019-1250mi-45866615-WAUENDF56KAxxxxxx-12
+images/open/Audi A5/FRONT/iaai/2018-3000mi-45704693-WAUENCF5XJA060484-32-$7600
+images/open/Audi RS 5/FRONT/iaai/2019-1250mi-45644589-WUABWCF56KAxxxxxx-05
 ```
 
 **The top folder is the SEARCH**, not IAAI's per-lot `model`. `--model-folder`
@@ -1094,8 +1124,30 @@ place — verified on lot 45655991, whose $7,400 Buy Now was **withdrawn** (not
 sold) between two pulls; a stale price in a folder name is a lie.
 
 Segments are identified by **shape, never position**: a year is `19xx`/`20xx`, a
-distance is digits + `mi`, a Buy Now starts with `$`, the lot is the remaining
-all-digit token, the VIN is the token containing letters. That is what lets one
+**lot and VIN are identified by WIDTH**, which is what makes everything else
+unambiguous. Both are fixed in this data — 8 digits and 17 characters on
+**2,781 of 2,781 rows, no exceptions** — so they can be lifted out first and the
+remaining tokens read from what is left:
+
+```
+lot     exactly 8 digits
+vin     exactly 17 characters
+year    4 digits, 19xx/20xx
+dist    digits + "mi"
+buy-now starts with "$"
+score   whatever 1-2 digit token remains — nothing else is that short
+```
+
+The score is therefore written **bare and zero-padded** (`38`, `08`, `50`) rather
+than prefixed. Padding matters for the same reason it does on distance: `8` would
+sort after `50`.
+
+**An unscored lot gains its segment later.** IAA assigns the score after
+processing check-in photos, so an `Auction Not Assigned` lot routinely arrives
+without one and gains it days later — the folder is renamed to add the segment
+then, and renamed again if IAA re-assesses. Verified for all four transitions:
+score appearing, score changing, VIN resolving simultaneously, and migration from
+the earlier `score38` form. That is what lets one
 parser read every naming generation this tree has had —
 
 ```
@@ -1154,6 +1206,34 @@ skipped. Verified — a second pass over the same 26 lots reports
 `images/open/manifest_open.csv` recording folder, damage group, model folder,
 counts, `renamed_from`,
 source CSV and pull time.
+
+### Departed lots are archived, not pruned
+
+```bash
+python analytics/scripts/pull_images_01.py CUT.csv --archive-sold
+```
+
+Photos of a lot that sold are the most valuable thing in the tree — they are the
+comp. Deleting them would be worse than useless, and leaving them under `open/`
+makes that tree a lie about what is biddable. So they move to `images/sold/`
+keeping the identical shape, which makes an open folder and its sold counterpart
+directly comparable:
+
+```
+images/open/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+images/sold/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+```
+
+"Departed" is `exit_state == 'gone'` from `lot_history_01.py`, which is
+scope-aware: a lot is only called gone when a later, non-truncated snapshot that
+actually covered its market **and** its search keyword failed to contain it. That
+matters here because the move is close to destructive — a false positive buries a
+live lot in the sold archive.
+
+**A relist reverses it.** `existing_dirs()` searches both buckets, so a lot that
+comes back is found under `sold/` and moved to `open/` by the next image run
+rather than being downloaded again. Verified round-trip in both directions with
+the photos preserved.
 
 ### Note on which lots have photos at all
 
@@ -1242,13 +1322,48 @@ A search-only pull produces records marked `_detail_level: "search"`: identity,
 state, auction date and buy-now, no attributes. They are adapted, not discarded,
 because that is exactly what history needs.
 
-Which forces one change in stage 3: **de-dupe is richest-first, then newest.**
-Straight newest-wins would let a 1-request search pull shadow a full record and
-blank ACV, repair estimate and damage codes. Static fields do not change between
-pulls anyway, and the fields that do move are captured in the history columns.
-Verified: lot 45856028 survives from the full 08-14 08:56 archive with its
-odometer and damage intact, even though the newest snapshot holds only a thin
-record for it.
+### De-dupe key: the first 11 VIN characters, not the whole VIN
+
+IAAI masks the last 6, so the SAME lot is `WAUENCF5XJA******` from a web pull and
+`WAUENCF5XJA060484` once Apibara resolves it. Keying on the full VIN files those
+as two different cars:
+
+```
+lot 45738201   enriched WAUENCF54JA009708 / web-only WAUENCF54JA******
+   full-VIN key -> 2 distinct  => lot emitted TWICE
+   11-char key  -> 1 distinct  => lot emitted ONCE
+```
+
+The unmasked 11 are the portion both sources always agree on. Current cuts happen
+to contain no duplicates only because every archive on disk has been enriched;
+the next web-only pull alongside an older enriched archive would have produced
+them.
+
+### Merging repeat sightings: static from the richest, volatile from the newest
+
+Neither newest-wins nor richest-wins is right on its own:
+
+| strategy | failure |
+|---|---|
+| newest-wins | a 1-request search pull carries no ACV, repair estimate or damage codes, so being newest it **blanks them** |
+| richest-wins | a full pull from yesterday then shadows today's `listing_state`, `auction_at` and `buy_now_usd` — the row **looks current and is not** |
+
+So `merge_observations()` takes the richest record as the base and overlays the
+`auction` and `pricing` blocks plus `_web_state` from the newest. Identity fields
+that only ever improve — VIN, seller name — take the better value from either,
+so a masked re-pull can never overwrite a resolved VIN.
+
+```
+richest (08-16, full)   ACV 17,975   state Prebid          auction 08-18   buy-now -
+newest  (08-17, search) ACV -        state Prebid/BuyNow   auction 08-21   buy-now 7,600
+merged                  ACV 17,975   state Prebid/BuyNow   auction 08-21   buy-now 7,600
+```
+
+`pulled_at` and `source_file` describe **currency** — they name the newest
+sighting, because that is what the row's live fields are as of. The static detail
+may have been captured earlier in the same cohort; `_merged_from` records every
+file involved, and `--history` gives the full span via `first_seen_at` /
+`last_seen_at`.
 
 ## Distance — computed in stage 2, from IAAI's own coordinates
 

@@ -149,6 +149,78 @@ def enrich(v, row, flat, forced_tier, history=None):
     return out
 
 
+
+# --------------------------------------------------------------------------
+# merging repeat observations of one lot
+# --------------------------------------------------------------------------
+# Fields that genuinely change between pulls. Everything else about a lot —
+# damage, odometer, engine, branch, coordinates, ACV, photos — is fixed for the
+# life of the listing, so it can safely come from whichever snapshot has it.
+VOLATILE_BLOCKS = ("auction", "pricing")
+VOLATILE_KEYS = ("_web_state", "_mode")
+
+
+def _has_detail(v):
+    return v.get("_detail_level") != "search"
+
+
+def _better_vin(a, b):
+    """Prefer a resolved VIN over a masked one, regardless of which is newer."""
+    av, bv = str(a or ""), str(b or "")
+    if "*" in av and "*" not in bv and bv:
+        return bv
+    return av or bv
+
+
+def merge_observations(obs):
+    """Several sightings of one lot -> one row.
+
+    Neither newest-wins nor richest-wins is right on its own:
+
+      newest-wins   a 1-request search pull carries no ACV, no repair estimate
+                    and no damage codes, so being newest it blanks them.
+      richest-wins  a full pull from yesterday then shadows today's listing
+                    state, auction date and Buy Now — the row looks current and
+                    is not.
+
+    So: take the RICHEST record as the base for static detail, then overlay the
+    volatile auction/pricing blocks from the NEWEST record. Identity fields that
+    only ever improve (VIN, seller name) take the better value from either.
+    """
+    if len(obs) == 1:
+        return obs[0]
+
+    by_time = sorted(obs, key=lambda v: v.get("_pulled_at") or "")
+    newest = by_time[-1]
+    # richest = has detail; ties broken by recency
+    richest = sorted(obs, key=lambda v: (_has_detail(v), v.get("_pulled_at") or ""))[-1]
+    if richest is newest:
+        return newest
+
+    merged = dict(richest)
+    for blk in VOLATILE_BLOCKS:
+        if isinstance(newest.get(blk), dict):
+            merged[blk] = newest[blk]
+    for k in VOLATILE_KEYS:
+        if k in newest:
+            merged[k] = newest[k]
+    merged["ad"] = newest.get("ad", merged.get("ad"))
+
+    # identity only improves, never degrades
+    merged["vin"] = _better_vin(richest.get("vin"), newest.get("vin"))
+    rs, ns = richest.get("seller") or {}, newest.get("seller") or {}
+    if not str(rs.get("name") or "").strip() and str(ns.get("name") or "").strip():
+        merged["seller"] = ns
+
+    # Provenance describes CURRENCY: the row is as of the newest sighting, even
+    # though its static detail may have been captured earlier in the cohort.
+    merged["_pulled_at"] = newest.get("_pulled_at")
+    merged["_source_file"] = newest.get("_source_file")
+    merged["_detail_level"] = richest.get("_detail_level")
+    merged["_merged_from"] = sorted({v.get("_source_file") for v in obs if v.get("_source_file")})
+    return merged
+
+
 # --------------------------------------------------------------------------
 def parse_tier(s):
     key = str(s).strip().lower()
@@ -276,32 +348,23 @@ def main(argv=None):
         if ctx:
             print(f"            (+{len(ctx)} ended archive(s) as price context)")
 
-    # De-dupe across overlapping archives: richest first, then newest.
+    # De-dupe across overlapping archives, then MERGE per field.
     #
-    # Straight newest-wins is wrong once the cheap search-only cadence exists —
-    # a 1-request search pull carries no ACV, no repair estimate and no damage
-    # codes, so being newest it would shadow a full record and blank those
-    # columns. Static fields do not change between pulls anyway; the fields
-    # that DO move (state, auction date, buy-now) are captured by --history.
-    def rank(v):
-        return (1 if v.get("_detail_level") == "search" else 0,
-                # negate by comparing later; tuple sorts ascending
-                v.get("_pulled_at") or "")
+    # The key uses the first 11 VIN characters, not the whole VIN. IAAI masks
+    # the last 6, so the SAME lot is `WAUENCF5XJA******` from a web pull and
+    # `WAUENCF5XJA060484` once Apibara resolves it — a full-VIN key files those
+    # as two different cars and emits the lot twice. The unmasked 11 are the
+    # portion both sources always agree on.
+    def dedupe_key(v):
+        vin = str(v.get("vin") or "").strip().upper()
+        return (v.get("platform"), str(v.get("lot_number") or ""), vin[:11])
 
-    by_key, dupes = {}, 0
+    groups = {}
     for v in records:
-        key = (v.get("platform"), v.get("lot_number"), v.get("vin"))
-        prev = by_key.get(key)
-        if prev is None:
-            by_key[key] = v
-            continue
-        dupes += 1
-        thin_new, thin_old = rank(v)[0], rank(prev)[0]
-        if thin_new < thin_old:
-            by_key[key] = v                      # richer wins outright
-        elif thin_new == thin_old and \
-                (v.get("_pulled_at") or "") >= (prev.get("_pulled_at") or ""):
-            by_key[key] = v                      # same richness -> newest wins
+        groups.setdefault(dedupe_key(v), []).append(v)
+    dupes = sum(len(g) - 1 for g in groups.values())
+
+    by_key = {k: merge_observations(g) for k, g in groups.items()}
 
     kept, dropped = [], []
     for v in by_key.values():

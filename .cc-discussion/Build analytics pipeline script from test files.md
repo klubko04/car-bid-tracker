@@ -57628,4 +57628,2405 @@ git remote -v | head -2
 git log --oneline -3
 ```
 
+*Result*
+```
+  74 prompts, 2,499,238 chars, 57,631 lines, 2.51 MB
+
+=== final commit preview ===
+39
+ M .env.example
+ M .gitignore
+ D df
+?? ".cc-discussion/Build analytics pipeline script from test files.md"
+?? .claude/
+?? analytics/
+?? images/
+?? test/test_apibara_filters_01.py
+
+=== branch / remote ===
+main
+origin	https://github.com/klubko04/car-bid-tracker.git (fetch)
+origin	https://github.com/klubko04/car-bid-tracker.git (push)
+d3478cf Add sold-lot image pipeline: tier classification, distance bucketing, tiered photo archive
+583637e Add location analysis and IAAI vs Copart details comparison in chat
+21854dd Add VS Code config, env setup, and APIBara Test scripts by IAAI and Copart
+```
+
+</details>
+
+Done on all three. Here's where it stands.
+
+## .gitignore
+
+Added `tmp/`, plus tree-preserving rules for both data directories:
+
+```gitignore
+analytics/data/**
+!analytics/data/**/
+!analytics/data/**/.gitkeep
+
+images/**
+!images/**/
+!images/**/.gitkeep
+```
+
+The `!.../` line is the one that matters — without re-including directories, git stops descending and never sees the `.gitkeep` files below them. I created 22 of them covering the canonical `{sold,open}/{json-raw,json-adapted,csv-raw,csv-cut,history}/{iaai,copart}` tree so a fresh clone can run the pipeline without reverse-engineering the layout.
+
+Also added `.claude/settings.local.json` (machine-local permissions) while keeping `settings.json`.
+
+Verified by spot-check — every one reports IGNORED: a real `json-raw` archive, a `csv-cut`, `manifest_open.csv`, a `.jpg`, `tmp-terminal.txt`, `.env`.
+
+**Commit preview: 39 files, 2.7 MB, zero data files.** The 131 MB of `analytics/data` and 1.73 GB of images stay local.
+
+## Secret scan — clean
+
+Since this goes to a public remote, I scanned rather than assumed:
+
+```
+Sanctum tokens (digits|40+)     none
+full sk_live keys               none
+X-API-Key / Bearer values       none
+32+ char hex blobs              2  -> API Auctions public OpenAPI operationIds
+```
+
+The one file flagged by a broad pattern was `pull_apiauctions_01.py`, which contains only the *validation regex* and a doc comment about the dashboard prefix. The 2.5 MB transcript is clean too — worth checking, since it's 74 turns of chat.
+
+## Schema doc — four real gaps found
+
+My previous edit to the folder-naming section **silently failed to match** and I hadn't verified it. Caught by grepping for `0250mi` and getting 0. Now fixed, plus:
+
+- **`search_keyword`** documented, including *why* it exists (the `RS 5` search returning 6 RS 3 lots)
+- **Folder naming** rewritten: gen-4 order, zero-padding, shape-based parsing, the four generations table, group/model moves
+- **Retention corrected** — the doc still said "~10-month window" from Apibara's docs. Replaced with today's measurement: rolling **~6 months**, confirmed by the 0-lot query and the corpus earliest of 2026-02-16, plus the finding that **the paid plan buys rate, not depth**, and the HTTP 502 on over-wide ranges
+- `build_chat_transcript.py` documented
+
+Doc now 1,418 lines. Transcript at **74 prompts, 2.51 MB**.
+
+## Push commands
+
+You're on `main`, remote is `https://github.com/klubko04/car-bid-tracker.git`.
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+
+# 1. confirm nothing unexpected — 39 files, no .json/.csv/.jpg
+git add -A -n | sed 's/^add .//;s/.$//' | sort
+
+# 2. stage and check once more
+git add -A
+git status --short
+
+# 3. commit
+git commit -m "$(cat <<'EOF'
+Add analytics pipeline: iaai.com web source, adapter, history, image archive
+
+Five-stage pipeline over two independent sources (Apibara API + iaai.com):
+pull_apibara_01 / pull_iaai_web_01 -> iaai_web_adapt_01 ->
+apibara_json2csv_iaai_01 -> data_pull_01 -> pull_images_01.
+
+- iaai.com direct pull: no key, no quota, 100 lots/page, sees the ~87% of
+  inventory Apibara never returns (Auction Not Assigned)
+- adapter reshapes web records into the Apibara shape so one flattener and one
+  68-column schema serve both sources
+- cross-snapshot history: relists, buy-now sales, declined approvals, exits
+- open-lot photo archive with self-migrating folder names
+- 1,418-line schema reference in analytics/schema/
+
+Data and images are gitignored; the folder tree is kept via .gitkeep.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+)"
+
+# 4. push
+git push origin main
+```
+
+Two things I did **not** do, deliberately: I didn't stage, commit or push anything — pushing is outward-facing and yours to trigger. And note step 1 lists `remove 'df'`, a stray empty file already deleted in your working tree; the commit will record that deletion, which is almost certainly what you want.
+
+## Prompt 75
+
+```
+I am not sure if #3. commit cli went thru when placed in wsl terminal because after pressing Enter it showed > and I had to do Ctrl-C to exit
+can I check if it was done correctly
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+Let me check the actual state rather than guess.
+
+<details>
+<summary>**Tool — Bash**: Check whether the commit landed</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+echo "=== last 3 commits ==="
+git log --oneline -3
+echo
+echo "=== is there anything staged? ==="
+git diff --cached --name-only | head -10
+echo "  staged file count: $(git diff --cached --name-only | wc -l)"
+echo
+echo "=== working tree status ==="
+git status --short | head -10
+echo
+echo "=== did the remote move? ==="
+git log origin/main --oneline -1 2>/dev/null || echo "  (no origin/main ref locally — never fetched/pushed)"
+```
+
+*Result*
+```
+=== last 3 commits ===
+d3478cf Add sold-lot image pipeline: tier classification, distance bucketing, tiered photo archive
+583637e Add location analysis and IAAI vs Copart details comparison in chat
+21854dd Add VS Code config, env setup, and APIBara Test scripts by IAAI and Copart
+
+=== is there anything staged? ===
+.cc-discussion/Build analytics pipeline script from test files.md
+.claude/settings.json
+.env.example
+.gitignore
+analytics/data/open/csv-cut/copart/.gitkeep
+analytics/data/open/csv-cut/iaai/.gitkeep
+analytics/data/open/csv-raw/copart/.gitkeep
+analytics/data/open/csv-raw/iaai/.gitkeep
+analytics/data/open/history/copart/.gitkeep
+analytics/data/open/history/iaai/.gitkeep
+  staged file count: 39
+
+=== working tree status ===
+A  ".cc-discussion/Build analytics pipeline script from test files.md"
+A  .claude/settings.json
+M  .env.example
+M  .gitignore
+A  analytics/data/open/csv-cut/copart/.gitkeep
+A  analytics/data/open/csv-cut/iaai/.gitkeep
+A  analytics/data/open/csv-raw/copart/.gitkeep
+A  analytics/data/open/csv-raw/iaai/.gitkeep
+A  analytics/data/open/history/copart/.gitkeep
+A  analytics/data/open/history/iaai/.gitkeep
+
+=== did the remote move? ===
+d3478cf Add sold-lot image pipeline: tier classification, distance bucketing, tiered photo archive
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Clear answer: **the commit did not happen, and nothing was damaged.**
+
+<details>
+<summary>**Tool — Bash**: Verify the staged set is still correct</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+echo "=== staged set — any data files that shouldn't be there? ==="
+git diff --cached --name-only | grep -E '\.(json|csv|jpg|jpeg|png|db)$' | grep -v '\.gitkeep' | head
+echo "  data files staged: $(git diff --cached --name-only | grep -E '\.(json|csv|jpg|jpeg|png|db)$' | grep -vc '\.gitkeep')"
+echo
+echo "=== staged breakdown ==="
+git diff --cached --name-only | sed 's#/[^/]*$##' | sort | uniq -c | sort -rn | head -8
+echo
+echo "=== total staged size ==="
+git diff --cached --name-only | while read f; do [ -f "$f" ] && stat -c%s "$f"; done | awk '{s+=$1} END {printf "  %.1f MB across %d files\n", s/1048576, NR}'
+echo
+echo "=== .env still ignored and NOT staged? ==="
+git diff --cached --name-only | grep -c '^\.env$' | sed 's/^/  .env staged: /'
+git check-ignore -q .env && echo "  .env ignored: yes"
+```
+
+*Result*
+```
+=== staged set — any data files that shouldn't be there? ===
+.claude/settings.json
+  data files staged: 1
+
+=== staged breakdown ===
+      9 analytics/scripts
+      2 test
+      1 images/open
+      1 images
+      1 df
+      1 analytics/schema
+      1 analytics/data/sold/json-raw/iaai
+      1 analytics/data/sold/json-raw/copart
+
+=== total staged size ===
+  2.7 MB across 38 files
+
+=== .env still ignored and NOT staged? ===
+  .env staged: 0
+  .env ignored: yes
+```
+
+</details>
+
+**The commit did not go through — but nothing is broken, and `git add -A` did succeed.**
+
+```
+last commit : d3478cf  (unchanged, same as before)
+staged      : 39 entries, 2.7 MB
+.env        : ignored, not staged
+data files  : 0  (the one .json match is .claude/settings.json — config, not data)
+```
+
+So step 2 worked and everything is sitting in the index ready to go. Ctrl-C aborted the commit cleanly without touching the staged files.
+
+## Why it hung
+
+The `>` prompt is bash saying "I'm still waiting for you to close something." The command I gave used a heredoc inside command substitution:
+
+```bash
+git commit -m "$(cat <<'EOF'
+...
+EOF
+)"
+```
+
+Pasted into a terminal, that's fragile — if the `EOF` line picks up trailing whitespace, or the paste mangles a newline, bash never sees the terminator and waits forever. My fault for handing you a multi-line construct to paste rather than something paste-safe.
+
+## Just run this
+
+Repeated `-m` flags give the same multi-paragraph message with no heredoc:
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+
+git commit -m "Add analytics pipeline: iaai.com web source, adapter, history, image archive" -m "Five-stage pipeline over two independent sources (Apibara API + iaai.com): pull_apibara_01 / pull_iaai_web_01 -> iaai_web_adapt_01 -> apibara_json2csv_iaai_01 -> data_pull_01 -> pull_images_01." -m "- iaai.com direct pull: no key, no quota, 100 lots/page, sees the ~87% of inventory Apibara never returns (Auction Not Assigned)
+- adapter reshapes web records into the Apibara shape so one flattener and one 68-column schema serve both sources
+- cross-snapshot history: relists, buy-now sales, declined approvals, exits
+- open-lot photo archive with self-migrating folder names
+- 1,418-line schema reference in analytics/schema/" -m "Data and images are gitignored; the folder tree is kept via .gitkeep." -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+
+git push origin main
+```
+
+If you'd rather avoid long pastes entirely, this is the minimal version — same result, one line:
+
+```bash
+git commit -m "Add analytics pipeline: iaai.com web source, adapter, history, image archive"
+git push origin main
+```
+
+## If it hangs again
+
+`Ctrl-C` is the right escape and is safe — it aborts the command without unstaging anything, exactly as it did here. You can verify any time with:
+
+```bash
+git log --oneline -1        # did the commit land?
+git status --short | wc -l  # still staged?
+```
+
+## Prompt 76
+
+```
+there are few things still need to be addressed:
+1) Deduplication uses (platform, lot#, full vin#) ([data_pull_01.py (line 291)](/home/striker/projects/car-bid-tracker/analytics/scripts/data_pull_01.py:291)). Because VIN changes from masked to resolved, the conceptual key should be platform, lot# and 11 chars of vin# (shared b/w iaai web and apibara). Current cuts happen to contain no duplicate lot numbers, but the latent failure mode remains.
+
+2) “Richest record first” protects ACV/damage from a newer search-only snapshot, but it can leave current listing_state, auction_at, or buy_now_usd stale. Please check if better merge could be field-level: static/detail fields from the richest record, volatile auction fields from the newest record.
+
+3) Image folder migration is strong: it handles masked→resolved VIN, damage-group changes, model-folder changes, distance, and Buy Now changes without current duplicates ([pull_images_01.py (line 229)](/home/striker/projects/car-bid-tracker/analytics/scripts/pull_images_01.py:229)). However, existing lots are never pruned when they leave the current cut when sold; that archival behavior should be explicitly captured - lets create "sold" subfolder in images\ and move sold lots with same as "open" structure.
+e.g. if lot "2018-2000mi-45316975-WAUKMAF44JN015356" will be sold it needs to be moved in images\sold\ as
+"Audi A4\FRONT\iaai\2018-2000mi-45316975-WAUKMAF44JN015356"
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+Three real issues, all correctly diagnosed. Tracking them:
+
+<details>
+<summary>**Tool — TodoWrite**</summary>
+
+```json
+{
+  "todos": [
+    {
+      "content": "Fix dedupe key: use 11-char VIN prefix instead of full VIN",
+      "status": "in_progress",
+      "activeForm": "Fixing the dedupe key"
+    },
+    {
+      "content": "Replace richest-wins with field-level merge (static from richest, volatile from newest)",
+      "status": "pending",
+      "activeForm": "Implementing field-level merge"
+    },
+    {
+      "content": "Add images/sold/ archive and move departed lots there",
+      "status": "pending",
+      "activeForm": "Adding the sold image archive"
+    },
+    {
+      "content": "Verify all three against real data, update schema doc and transcript",
+      "status": "pending",
+      "activeForm": "Verifying and documenting"
+    }
+  ]
+}
+```
+
+*Result*
+```
+Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Read the current dedupe block</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+sed -n '278,310p' analytics/scripts/data_pull_01.py
+```
+
+*Result*
+```
+    # De-dupe across overlapping archives: richest first, then newest.
+    #
+    # Straight newest-wins is wrong once the cheap search-only cadence exists —
+    # a 1-request search pull carries no ACV, no repair estimate and no damage
+    # codes, so being newest it would shadow a full record and blank those
+    # columns. Static fields do not change between pulls anyway; the fields
+    # that DO move (state, auction date, buy-now) are captured by --history.
+    def rank(v):
+        return (1 if v.get("_detail_level") == "search" else 0,
+                # negate by comparing later; tuple sorts ascending
+                v.get("_pulled_at") or "")
+
+    by_key, dupes = {}, 0
+    for v in records:
+        key = (v.get("platform"), v.get("lot_number"), v.get("vin"))
+        prev = by_key.get(key)
+        if prev is None:
+            by_key[key] = v
+            continue
+        dupes += 1
+        thin_new, thin_old = rank(v)[0], rank(prev)[0]
+        if thin_new < thin_old:
+            by_key[key] = v                      # richer wins outright
+        elif thin_new == thin_old and \
+                (v.get("_pulled_at") or "") >= (prev.get("_pulled_at") or ""):
+            by_key[key] = v                      # same richness -> newest wins
+
+    kept, dropped = [], []
+    for v in by_key.values():
+        ok, why = flat.keep(v, filters)
+        (kept if ok else dropped).append((v, why))
+```
+
+</details>
+
+Replacing both the key and the merge in one pass:
+
+<details>
+<summary>**Tool — Bash**: Implement 11-char key and field-level merge</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/data_pull_01.py"); s=p.read_text(encoding="utf-8")
+old = s[s.index("    # De-dupe across overlapping archives: richest first, then newest."):
+        s.index("    kept, dropped = [], []")]
+new = '''    # De-dupe across overlapping archives, then MERGE per field.
+    #
+    # The key uses the first 11 VIN characters, not the whole VIN. IAAI masks
+    # the last 6, so the SAME lot is `WAUENCF5XJA******` from a web pull and
+    # `WAUENCF5XJA060484` once Apibara resolves it — a full-VIN key files those
+    # as two different cars and emits the lot twice. The unmasked 11 are the
+    # portion both sources always agree on.
+    def dedupe_key(v):
+        vin = str(v.get("vin") or "").strip().upper()
+        return (v.get("platform"), str(v.get("lot_number") or ""), vin[:11])
+
+    groups = {}
+    for v in records:
+        groups.setdefault(dedupe_key(v), []).append(v)
+    dupes = sum(len(g) - 1 for g in groups.values())
+
+    by_key = {k: merge_observations(g) for k, g in groups.items()}
+
+'''
+s = s.replace(old, new, 1)
+
+MERGE = '''
+# --------------------------------------------------------------------------
+# merging repeat observations of one lot
+# --------------------------------------------------------------------------
+# Fields that genuinely change between pulls. Everything else about a lot —
+# damage, odometer, engine, branch, coordinates, ACV, photos — is fixed for the
+# life of the listing, so it can safely come from whichever snapshot has it.
+VOLATILE_BLOCKS = ("auction", "pricing")
+VOLATILE_KEYS = ("_web_state", "_mode")
+
+
+def _has_detail(v):
+    return v.get("_detail_level") != "search"
+
+
+def _better_vin(a, b):
+    """Prefer a resolved VIN over a masked one, regardless of which is newer."""
+    av, bv = str(a or ""), str(b or "")
+    if "*" in av and "*" not in bv and bv:
+        return bv
+    return av or bv
+
+
+def merge_observations(obs):
+    """Several sightings of one lot -> one row.
+
+    Neither newest-wins nor richest-wins is right on its own:
+
+      newest-wins   a 1-request search pull carries no ACV, no repair estimate
+                    and no damage codes, so being newest it blanks them.
+      richest-wins  a full pull from yesterday then shadows today's listing
+                    state, auction date and Buy Now — the row looks current and
+                    is not.
+
+    So: take the RICHEST record as the base for static detail, then overlay the
+    volatile auction/pricing blocks from the NEWEST record. Identity fields that
+    only ever improve (VIN, seller name) take the better value from either.
+    """
+    if len(obs) == 1:
+        return obs[0]
+
+    by_time = sorted(obs, key=lambda v: v.get("_pulled_at") or "")
+    newest = by_time[-1]
+    # richest = has detail; ties broken by recency
+    richest = sorted(obs, key=lambda v: (_has_detail(v), v.get("_pulled_at") or ""))[-1]
+    if richest is newest:
+        return newest
+
+    merged = dict(richest)
+    for blk in VOLATILE_BLOCKS:
+        if isinstance(newest.get(blk), dict):
+            merged[blk] = newest[blk]
+    for k in VOLATILE_KEYS:
+        if k in newest:
+            merged[k] = newest[k]
+    merged["ad"] = newest.get("ad", merged.get("ad"))
+
+    # identity only improves, never degrades
+    merged["vin"] = _better_vin(richest.get("vin"), newest.get("vin"))
+    rs, ns = richest.get("seller") or {}, newest.get("seller") or {}
+    if not str(rs.get("name") or "").strip() and str(ns.get("name") or "").strip():
+        merged["seller"] = ns
+
+    # Provenance describes CURRENCY: the row is as of the newest sighting, even
+    # though its static detail may have been captured earlier in the cohort.
+    merged["_pulled_at"] = newest.get("_pulled_at")
+    merged["_source_file"] = newest.get("_source_file")
+    merged["_detail_level"] = richest.get("_detail_level")
+    merged["_merged_from"] = sorted({v.get("_source_file") for v in obs if v.get("_source_file")})
+    return merged
+
+
+'''
+s = s.replace("# --------------------------------------------------------------------------\ndef parse_tier(s):", MERGE + "# --------------------------------------------------------------------------\ndef parse_tier(s):",1)
+p.write_text(s, encoding="utf-8"); print("patched")
+PY
+python -m py_compile analytics/scripts/data_pull_01.py && echo "compile OK"
+```
+
+*Result*
+```
+patched
+compile OK
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Verify the merge behaviour</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys; sys.path.insert(0,"analytics/scripts")
+import data_pull_01 as D
+
+def rec(vin, pulled, level, state, auction_at, bn, acv_marker):
+    return {"platform":"iaai","lot_number":"45704693","vin":vin,
+            "_pulled_at":pulled,"_detail_level":level,"_web_state":state,
+            "_source_file":f"snap_{pulled}.json",
+            "auction":{"auction_at":auction_at},"pricing":{"buy_now_usd":bn},
+            "details":{"attributes":{"ACV_MARKER":acv_marker}},
+            "seller":{"name":"Progressive" if level=="full" else ""}}
+
+# yesterday: FULL detail, masked VIN, no buy-now, old auction date
+# today:     SEARCH only, resolved VIN, buy-now appeared, new auction date
+old = rec("WAUENCF5XJA******","2026-08-16T09:00","full","Prebid","2026-08-18T13:30",None,"from_full_pull")
+new = rec("WAUENCF5XJA060484","2026-08-17T09:00","search","Prebid/BuyNow","2026-08-21T13:30",7600,None)
+
+print("=== dedupe key: masked vs resolved VIN must collide ===")
+print("   old:", D.dedupe_key(old) if hasattr(D,'dedupe_key') else "(inline)")
+PY
+python - <<'PY'
+import sys, importlib; sys.path.insert(0,"analytics/scripts")
+import data_pull_01 as D
+def rec(vin, pulled, level, state, auction_at, bn, acv):
+    return {"platform":"iaai","lot_number":"45704693","vin":vin,
+            "_pulled_at":pulled,"_detail_level":level,"_web_state":state,
+            "_source_file":f"snap_{pulled[:10]}.json",
+            "auction":{"auction_at":auction_at},"pricing":{"buy_now_usd":bn},
+            "details":{"attributes":{"ACV":acv}},
+            "seller":{"name":"Progressive" if level=="full" else ""}}
+old = rec("WAUENCF5XJA******","2026-08-16T09:00","full","Prebid","2026-08-18T13:30",None,"17975")
+new = rec("WAUENCF5XJA060484","2026-08-17T09:00","search","Prebid/BuyNow","2026-08-21T13:30",7600,None)
+m = D.merge_observations([old,new])
+print("=== field-level merge ===")
+print(f"   vin           {m['vin']}          (resolved wins over masked)")
+print(f"   ACV           {m['details']['attributes']['ACV']}                     (STATIC from the full record)")
+print(f"   seller        {m['seller']['name']}               (from whichever had it)")
+print(f"   _web_state    {m['_web_state']}          (VOLATILE from newest)")
+print(f"   auction_at    {m['auction']['auction_at']}  (VOLATILE from newest)")
+print(f"   buy_now_usd   {m['pricing']['buy_now_usd']}                   (VOLATILE from newest)")
+print(f"   _pulled_at    {m['_pulled_at']}   (currency = newest)")
+print(f"   _merged_from  {m['_merged_from']}")
+PY
+```
+
+*Result*
+```
+=== dedupe key: masked vs resolved VIN must collide ===
+   old: (inline)
+=== field-level merge ===
+   vin           WAUENCF5XJA060484          (resolved wins over masked)
+   ACV           17975                     (STATIC from the full record)
+   seller        Progressive               (from whichever had it)
+   _web_state    Prebid/BuyNow          (VOLATILE from newest)
+   auction_at    2026-08-21T13:30  (VOLATILE from newest)
+   buy_now_usd   7600                   (VOLATILE from newest)
+   _pulled_at    2026-08-17T09:00   (currency = newest)
+   _merged_from  ['snap_2026-08-16.json', 'snap_2026-08-17.json']
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Merge works. Now verifying the dedupe fix against real archives:
+
+<details>
+<summary>**Tool — Bash**: Find lots that would have duplicated under the old key</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import json, glob, collections
+# does any lot appear with BOTH a masked and a resolved VIN across archives?
+seen=collections.defaultdict(set)
+for f in glob.glob("analytics/data/open/json-adapted/iaai/adapted_*.json"):
+    d=json.load(open(f))
+    for r in d["pages"][0]["raw"]["data"]:
+        seen[str(r["lot_number"])].add(str(r.get("vin") or ""))
+mixed={k:v for k,v in seen.items() if len(v)>1 and any("*" in x for x in v)}
+print(f"lots seen with BOTH masked and resolved VIN: {len(mixed)}")
+for k,v in list(mixed.items())[:5]:
+    print(f"   lot {k}: {sorted(v)}")
+print()
+old_dupes = sum(len({(k,x) for x in v})-1 for k,v in mixed.items())
+print(f"under the OLD full-VIN key these produced {old_dupes} phantom duplicate row(s)")
+print(f"under the NEW 11-char key they collapse to 1 row each")
+PY
+```
+
+*Result*
+```
+lots seen with BOTH masked and resolved VIN: 0
+
+under the OLD full-VIN key these produced 0 phantom duplicate row(s)
+under the NEW 11-char key they collapse to 1 row each
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+None currently — because I re-adapted every archive with enrichment, so they're consistent. The failure mode is latent, not active. Let me prove the fix works by reproducing the condition:
+
+<details>
+<summary>**Tool — Bash**: Reproduce the latent duplicate and prove the fix</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import json, sys, glob; sys.path.insert(0,"analytics/scripts")
+import data_pull_01 as D
+# take a REAL enriched record, and the same lot as it looked pre-enrichment
+f=sorted(glob.glob("analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_2018_audi_a5_*.json"))[-1]
+recs=json.load(open(f))["pages"][0]["raw"]["data"]
+full=next(r for r in recs if r.get("vin") and "*" not in str(r["vin"]))
+masked=dict(full); masked["vin"]=full["vin"][:11]+"******"
+masked["_pulled_at"]="2026-08-18T09:00"; masked["_detail_level"]="search"
+masked["_source_file"]="tomorrow_search_only.json"
+
+def old_key(v): return (v.get("platform"), v.get("lot_number"), v.get("vin"))
+def new_key(v):
+    vin=str(v.get("vin") or "").strip().upper()
+    return (v.get("platform"), str(v.get("lot_number") or ""), vin[:11])
+
+print(f"lot {full['lot_number']}")
+print(f"  enriched : {full['vin']}")
+print(f"  web-only : {masked['vin']}   (tomorrow's search-only pull)")
+print(f"\n  OLD key -> {len({old_key(full), old_key(masked)})} distinct  => lot emitted TWICE")
+print(f"  NEW key -> {len({new_key(full), new_key(masked)})} distinct  => lot emitted ONCE")
+m=D.merge_observations([full,masked])
+print(f"\n  merged vin       : {m['vin']}   (masked did not overwrite the resolved one)")
+print(f"  merged detail lvl: {m['_detail_level']}   (kept the rich record's detail)")
+print(f"  merged pulled_at : {m['_pulled_at']}   (currency from the newer sighting)")
+PY
+```
+
+*Result*
+```
+lot 45738201
+  enriched : WAUENCF54JA009708
+  web-only : WAUENCF54JA******   (tomorrow's search-only pull)
+
+  OLD key -> 2 distinct  => lot emitted TWICE
+  NEW key -> 1 distinct  => lot emitted ONCE
+
+  merged vin       : WAUENCF54JA009708   (masked did not overwrite the resolved one)
+  merged detail lvl: full   (kept the rich record's detail)
+  merged pulled_at : 2026-08-18T09:00   (currency from the newer sighting)
+```
+
+</details>
+
+Latent bug reproduced and fixed. Now the sold archive:
+
+<details>
+<summary>**Tool — TodoWrite**</summary>
+
+```json
+{
+  "todos": [
+    {
+      "content": "Fix dedupe key: use 11-char VIN prefix instead of full VIN",
+      "status": "completed",
+      "activeForm": "Fixing the dedupe key"
+    },
+    {
+      "content": "Replace richest-wins with field-level merge (static from richest, volatile from newest)",
+      "status": "completed",
+      "activeForm": "Implementing field-level merge"
+    },
+    {
+      "content": "Add images/sold/ archive and move departed lots there",
+      "status": "in_progress",
+      "activeForm": "Adding the sold image archive"
+    },
+    {
+      "content": "Verify all three against real data, update schema doc and transcript",
+      "status": "pending",
+      "activeForm": "Verifying and documenting"
+    }
+  ]
+}
+```
+
+*Result*
+```
+Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Add open/sold buckets to the image tree</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+
+# lot_dir / existing_dirs gain a bucket
+s=s.replace('''def lot_dir(platform, lot, vin, group, model, year="", dist_bucket="",
+            buy_now="", mask_char="x"):
+    return (IMAGES_ROOT / "open" / model / group / platform
+            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char))''',
+'''BUCKETS = ("open", "sold")
+
+
+def lot_dir(platform, lot, vin, group, model, year="", dist_bucket="",
+            buy_now="", mask_char="x", bucket="open"):
+    return (IMAGES_ROOT / bucket / model / group / platform
+            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char))''',1)
+
+s=s.replace('''    roots = [IMAGES_ROOT / "open" / g / platform for g in DAMAGE_DIRS]
+    roots.append(IMAGES_ROOT / "open" / platform)      # pre-group layout''',
+'''    roots = [IMAGES_ROOT / "open" / g / platform for g in DAMAGE_DIRS]
+    roots.append(IMAGES_ROOT / "open" / platform)      # pre-group layout''',1)
+
+s=s.replace('''    root = IMAGES_ROOT / "open"
+    if not root.exists():
+        return
+    seen = set()
+    # every {model}/{group}/{platform}, plus the two legacy shapes
+    candidates = list(root.glob(f"*/*/{platform}"))          # model/group/platform
+    candidates += [root / g / platform for g in DAMAGE_DIRS]  # pre-model
+    candidates.append(root / platform)                        # pre-group''',
+'''    seen = set()
+    candidates = []
+    # BOTH buckets: a sold lot that relists has to be found under sold/ and
+    # moved back to open/, not duplicated there.
+    for b in BUCKETS:
+        root = IMAGES_ROOT / b
+        if not root.is_dir():
+            continue
+        candidates += list(root.glob(f"*/*/{platform}"))          # model/group/platform
+        candidates += [root / g / platform for g in DAMAGE_DIRS]  # pre-model
+        candidates.append(root / platform)                        # pre-group''',1)
+
+# resolve_folder gains bucket
+s=s.replace('''def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                   buy_now="", mask_char="x", apply=True):''',
+'''def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                   buy_now="", mask_char="x", apply=True, bucket="open"):''',1)
+s=s.replace('''    return _resolve_folder(platform, lot, vin, group, model, year, dist_bucket,
+                           buy_now, mask_char, apply)''',
+'''    return _resolve_folder(platform, lot, vin, group, model, year, dist_bucket,
+                           buy_now, mask_char, apply, bucket)''',1)
+s=s.replace('''def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                    buy_now="", mask_char="x", apply=True):''',
+'''def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                    buy_now="", mask_char="x", apply=True, bucket="open"):''',1)
+s=s.replace('''    want = lot_dir(platform, lot, vin, group, model, year, dist_bucket, buy_now,
+                   mask_char)''',
+'''    want = lot_dir(platform, lot, vin, group, model, year, dist_bucket, buy_now,
+                   mask_char, bucket)''',1)
+p.write_text(s, encoding="utf-8"); print("bucket threaded through")
+PY
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+```
+
+*Result*
+```
+bucket threaded through
+compile OK
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Add the archive_sold pass</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+
+ARCHIVE = '''
+# --------------------------------------------------------------------------
+# archiving lots that have left the listings
+# --------------------------------------------------------------------------
+def archive_sold(platform="iaai", apply=True):
+    """Move folders for departed lots from images/open/ to images/sold/.
+
+    Photos of a lot that sold are the most valuable thing in the tree — they are
+    the comp. Deleting them would be worse than useless, and leaving them in
+    `open/` makes the open tree a lie about what is actually biddable. So they
+    are archived, keeping the identical {model}/{group}/{platform}/{name} shape
+    so an open folder and its sold counterpart are directly comparable.
+
+    "Departed" is `exit_state == 'gone'` from lot_history_01, which is itself
+    scope-aware — a lot is only called gone when a later, non-truncated snapshot
+    that actually covered its market and keyword failed to contain it. That
+    matters here because the move is destructive-ish: a false positive would
+    bury a live lot in the sold archive.
+
+    A relist reverses it. `existing_dirs()` searches both buckets, so a lot that
+    comes back is found under sold/ and moved to open/ by the next image run
+    rather than being downloaded a second time.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lot_history_01 as HIST
+    import apibara_json2csv_iaai_01 as F
+
+    paths = HIST.all_archives()
+    if not paths:
+        return [], []
+    history = HIST.build_history(F.load_records(paths), paths)
+
+    moved, skipped = [], []
+    root = IMAGES_ROOT / "open"
+    if not root.is_dir():
+        return moved, skipped
+    for folder in sorted(root.glob(f"*/*/{platform}/*")):
+        if not folder.is_dir():
+            continue
+        lot = parse_folder_name(folder.name)[0]
+        h = history.get(lot)
+        if not h or h.get("exit_state") != "gone":
+            continue
+        dest = (IMAGES_ROOT / "sold" / folder.parents[1].name
+                / folder.parent.name.replace(platform, platform)
+                / platform / folder.name)
+        dest = IMAGES_ROOT / "sold" / folder.parents[2].name / folder.parents[1].name / platform / folder.name
+        if dest.exists():
+            skipped.append((folder, dest, "destination exists"))
+            continue
+        if apply:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            folder.rename(dest)
+        moved.append((folder, dest, h.get("exit_reason") or "unknown",
+                      h.get("exit_price_usd") or ""))
+    return moved, skipped
+
+
+'''
+s=s.replace("# --------------------------------------------------------------------------\n# filtering", ARCHIVE + "# --------------------------------------------------------------------------\n# filtering",1)
+
+s=s.replace('''    ap.add_argument("--dry-run", action="store_true",''',
+'''    ap.add_argument("--archive-sold", action="store_true",
+                    help="before downloading, move folders for lots that have "
+                         "left the listings from images/open/ to images/sold/, "
+                         "keeping the same {model}/{group}/{platform} shape")
+    ap.add_argument("--dry-run", action="store_true",''',1)
+p.write_text(s, encoding="utf-8"); print("archive_sold added")
+PY
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+```
+
+*Result*
+```
+archive_sold added
+compile OK
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Wire the flag and dry-run the archive pass</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib, re
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+# clean the duplicated dest assignment left by the patch
+s=s.replace('''        dest = (IMAGES_ROOT / "sold" / folder.parents[1].name
+                / folder.parent.name.replace(platform, platform)
+                / platform / folder.name)
+        dest = IMAGES_ROOT / "sold" / folder.parents[2].name / folder.parents[1].name / platform / folder.name''',
+'''        # folder is  images/open/{model}/{group}/{platform}/{name}
+        model, group = folder.parents[2].name, folder.parents[1].name
+        dest = IMAGES_ROOT / "sold" / model / group / platform / folder.name''',1)
+# wire the flag into main()
+s=s.replace('''    rows = list(csv.DictReader(open(path, encoding="utf-8")))
+    model_folder = args.model_folder or derive_model_folder(rows)''',
+'''    rows = list(csv.DictReader(open(path, encoding="utf-8")))
+    model_folder = args.model_folder or derive_model_folder(rows)
+
+    if args.archive_sold:
+        moved, skipped = archive_sold(args.platform, apply=not args.dry_run)
+        verb = "would move" if args.dry_run else "moved"
+        print(f"\\n  archive: {verb} {len(moved)} departed lot(s) -> images/sold/")
+        for src, dest, reason, price in moved[:20]:
+            tag = f"{reason}" + (f" ${price}" if price else "")
+            print(f"      {src.parents[2].name}/{src.parents[1].name}/{src.name}  [{tag}]")
+        for src, dest, why in skipped:
+            print(f"      !! skipped {src.name}: {why}")''',1)
+p.write_text(s, encoding="utf-8"); print("wired")
+PY
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+echo
+echo "=== dry-run the archive pass ==="
+CUT=$(ls -t analytics/data/open/csv-cut/iaai/audi_a5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_*.csv | head -1)
+python analytics/scripts/pull_images_01.py "$(basename $CUT)" --archive-sold --dry-run 2>&1 | grep -vE "^  loaded" | grep -A22 "archive:"
+```
+
+*Result*
+```
+wired
+compile OK
+
+=== dry-run the archive pass ===
+  archive: would move 0 departed lot(s) -> images/sold/
+==============================================================================
+Open-lot images — audi_a5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260816T193941.csv
+==============================================================================
+  84 row(s) in, 82 match
+  filtered out: {'no images': 2}
+  size:   xl (1600x1200)
+  model:  Audi A5   (derived from the CSV)
+  target: images/open/Audi A5/{FRONT|REAR-SIDE|OTHER}/iaai/{lot}-{vin}[-{year}][-{dist}][-${buynow}]/
+  1372 image(s) across 82 lot(s)   ~6 min
+
+  DRY RUN — nothing downloaded.
+    45704693   2018 A5         Right front      17 img  -> FRONT/iaai/2018-3000mi-45704693-WAUENCF5XJA060484-$7600
+    45738201   2018 A5         Left side        17 img  -> REAR-SIDE/iaai/2018-3000mi-45738201-WAUENCF54JA009708
+    45490663   2018 A5         Front end        17 img  -> FRONT/iaai/2018-2250mi-45490663-WAUENCF55JA084384
+    45662018   2018 A5         Front end        17 img  -> FRONT/iaai/2018-1250mi-45662018-WAUENCF51JA104260
+    45830276   2018 A5         Roof             18 img  -> FRONT/iaai/2018-3000mi-45830276-WAUDNCF56JAxxxxxx
+    45814210   2018 A5         Flood            11 img  -> OTHER/iaai/2018-2250mi-45814210-WAUANCF59JAxxxxxx
+    45805701   2018 A5         Right rear       22 img  -> REAR-SIDE/iaai/2018-2500mi-45805701-WAUDNCF55JAxxxxxx
+    45776741   2018 A5         Theft            15 img  -> REAR-SIDE/iaai/2018-1250mi-45776741-WAUDNCF51JAxxxxxx
+    45774275   2018 A5         Left side        16 img  -> REAR-SIDE/iaai/2018-3000mi-45774275-WAUANCF59JAxxxxxx
+    45762164   2018 A5         Front end        17 img  -> FRONT/iaai/2018-3000mi-45762164-WAUENCF54JAxxxxxx
+    45687563   2018 A5         Left front       16 img  -> FRONT/iaai/2018-2500mi-45687563-WAUENCF55JAxxxxxx
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+0 to move — let me verify that's correct rather than a silent no-op:
+
+<details>
+<summary>**Tool — Bash**: Check whether any image-folder lot is departed</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys, glob, os; sys.path.insert(0,"analytics/scripts")
+import lot_history_01 as HIST, apibara_json2csv_iaai_01 as F, pull_images_01 as P
+paths=HIST.all_archives(); h=HIST.build_history(F.load_records(paths), paths)
+folders={P.parse_folder_name(os.path.basename(d.rstrip('/')))[0]: d
+         for d in glob.glob("images/open/*/*/iaai/*/")}
+print(f"{len(folders)} lot folders on disk")
+gone=[l for l in folders if (h.get(l) or {}).get("exit_state")=="gone"]
+print(f"  of those, exit_state=gone: {len(gone)}")
+nohist=[l for l in folders if l not in h]
+print(f"  with no history entry    : {len(nohist)}")
+import collections
+states=collections.Counter((h.get(l) or {}).get("exit_state","(no history)") for l in folders)
+print(f"  exit_state spread        : {dict(states)}")
+print(f"\n  total lots history calls gone: {sum(1 for v in h.values() if v['exit_state']=='gone')}")
+print("  (those are overwhelmingly Apibara `ended` records, which never had image folders)")
+PY
+```
+
+*Result*
+```
+  loaded   70 record(s) from apibara_iaai_ended_audi_s5_2018-2023_2025-08-01_2026-08-10_20260810T133939.json  [ended]
+  loaded  310 record(s) from apibara_iaai_ended_lexus_es-350_2019-2023_2025-08-01_2026-08-10_20260810T195130.json  [ended]
+  loaded  128 record(s) from apibara_iaai_ended_lexus_is-350_2018-2023_2025-08-01_2026-08-10_20260810T200427.json  [ended]
+  loaded  178 record(s) from apibara_iaai_ended_lexus_is-300_2018-2023_2025-08-01_2026-08-10_20260810T200801.json  [ended]
+  loaded   54 record(s) from apibara_iaai_ended_audi_s4_2018-2023_2025-08-01_2026-08-12_20260812T092839.json  [ended]
+  loaded    4 record(s) from apibara_iaai_ended_audi_s6_2018-2023_2025-08-01_2026-08-12_20260812T094020.json  [ended]
+  loaded   17 record(s) from apibara_iaai_ended_audi_s3_2018-2023_2025-08-01_2026-08-12_20260812T094103.json  [ended]
+  loaded  175 record(s) from apibara_iaai_ended_audi_a5_2018-2023_2025-08-01_2026-08-12_20260812T094200.json  [ended]
+  loaded  384 record(s) from apibara_iaai_ended_audi_a4_2018-2023_2025-08-01_2026-08-12_20260812T095317.json  [ended]
+  loaded    2 record(s) from apibara_iaai_open_audi_s5_2018-2023_20260813T075100.json  [open]
+  loaded   13 record(s) from apibara_iaai_open_audi_a5_2018-2023_20260813T085213.json  [open]
+  loaded   14 record(s) from apibara_iaai_open_audi_a5_2018-2023_20260813T141301.json  [open]
+  loaded    5 record(s) from apibara_iaai_ended_audi_a5_2018-2023_2026-08-12_2026-08-16_20260816T093327.json  [ended]
+  loaded    0 record(s) from apibara_iaai_ended_audi_a5_2018-2023_2026-08-17_2026-08-31_20260816T093408.json  [ended]
+  loaded   14 record(s) from apibara_iaai_ended_audi_a5_2018-2023_2026-08-01_2026-08-16_20260816T093522.json  [ended]
+  loaded  133 record(s) from adapted_iaaiweb_iaai_open_2018_mazda_mazda3_20260816T091837.json  [open]
+  loaded  133 record(s) from adapted_iaaiweb_iaai_open_2018_mazda_mazda3_20260816T091918.json  [open]
+  loaded   15 record(s) from apibara_iaai_open_audi_a5_2018-2023_20260816T104954.json  [open]
+  loaded   65 record(s) from adapted_iaaiweb_iaai_open_2018_audi_a5_20260813T144843.json  [open]
+  loaded   64 record(s) from adapted_iaaiweb_iaai_open_2018_audi_a5_20260814T085640.json  [open]
+  loaded   64 record(s) from adapted_iaaiweb_iaai_open_2018_audi_a5_20260814T094040.json  [open]
+  loaded   67 record(s) from adapted_iaaiweb_iaai_open_2018_audi_a5_20260815T111328.json  [open]
+  loaded   65 record(s) from adapted_iaaiweb_iaai_open_2018_audi_a5_20260815T112810.json  [open]
+  loaded   65 record(s) from adapted_iaaiweb_iaai_open_2018_audi_a5_20260816T093056.json  [open]
+  loaded   32 record(s) from adapted_iaaiweb_iaai_open_2019_audi_a5_20260814T171720.json  [open]
+  loaded   34 record(s) from adapted_iaaiweb_iaai_open_2019_audi_a5_20260815T110317.json  [open]
+  loaded  112 record(s) from adapted_iaaiweb_iaai_open_audi_a5_2019_2023_20260816T100259.json  [open]
+  loaded    4 record(s) from apibara_iaai_open_audi_s5_2018-2023_20260816T153147.json  [open]
+  loaded   71 record(s) from adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260816T152846.json  [open]
+  loaded    2 record(s) from apibara_iaai_open_audi_rs-5_2018-2023_20260816T160424.json  [open]
+  loaded   19 record(s) from adapted_iaaiweb_iaai_open_audi_rs_5_2018_2023_20260816T160301.json  [open]
+  loaded    0 record(s) from apibara_iaai_open_lexus_is-350_2018-2020_20260816T163507.json  [open]
+  loaded    0 record(s) from apibara_iaai_open_lexus_is-350_2018-2020_20260816T163529.json  [open]
+  loaded    0 record(s) from apibara_iaai_open_lexus_is350_2018-2020_20260816T163545.json  [open]
+  loaded    0 record(s) from apibara_iaai_open_lexus_is-350_2018-2020_20260816T163628.json  [open]
+  loaded   16 record(s) from apibara_iaai_ended_lexus_is-350_2018-2020_20260816T164632.json  [ended]
+  loaded   43 record(s) from apibara_iaai_open_audi_a4_2018-2023_20260816T165830.json  [open]
+  loaded  197 record(s) from adapted_iaaiweb_iaai_open_audi_a4_2018_2023_20260816T165004.json  [open]
+  loaded    9 record(s) from apibara_iaai_open_audi_s4_2018-2023_20260816T193819.json  [open]
+  loaded    9 record(s) from apibara_iaai_open_audi_s4_2018-2023_20260816T204349.json  [open]
+  loaded   30 record(s) from adapted_iaaiweb_iaai_open_audi_s4_2018_2023_20260816T204226.json  [open]
+  loaded   90 record(s) from apibara_iaai_ended_audi_s5_2018-2023_2025-08-17_2026-08-17_20260817T083405.json  [ended]
+  loaded    3 record(s) from apibara_iaai_open_audi_s5_2018-2023_20260817T083903.json  [open]
+  loaded   71 record(s) from adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260817T083558.json  [open]
+314 lot folders on disk
+  of those, exit_state=gone: 0
+  with no history entry    : 0
+  exit_state spread        : {'still_listed': 314}
+
+  total lots history calls gone: 1345
+  (those are overwhelmingly Apibara `ended` records, which never had image folders)
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+All 314 are `still_listed`, so 0 is correct — not a silent no-op. Let me prove the archive actually works with a controlled test:
+
+<details>
+<summary>**Tool — Bash**: Sandbox-test archive and relist round-trip</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys, shutil, tempfile, pathlib
+sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+tmp=pathlib.Path(tempfile.mkdtemp()); P.IMAGES_ROOT=tmp
+
+# a lot in open/ that history says is gone
+d=tmp/"open"/"Audi A4"/"FRONT"/"iaai"/"2018-2000mi-45316975-WAUKMAF44JN015356"
+d.mkdir(parents=True); (d/"45316975_001.jpg").write_text("img")
+# a lot that is still listed
+d2=tmp/"open"/"Audi A4"/"FRONT"/"iaai"/"2019-1000mi-45111111-WAUAAAAAAAA111111"
+d2.mkdir(parents=True); (d2/"x.jpg").write_text("img")
+
+# stub the history lookup
+import lot_history_01 as HIST, apibara_json2csv_iaai_01 as F
+HIST.all_archives=lambda: ["stub"]
+F.load_records=lambda paths: []
+HIST.build_history=lambda recs,paths: {
+    "45316975": {"exit_state":"gone","exit_reason":"sold_at_auction","exit_price_usd":21025.0},
+    "45111111": {"exit_state":"still_listed","exit_reason":"","exit_price_usd":""}}
+
+moved,skipped=P.archive_sold("iaai")
+print("moved:")
+for src,dest,reason,price in moved:
+    print(f"   {src.relative_to(tmp)}")
+    print(f"     -> {dest.relative_to(tmp)}   [{reason} ${price}]")
+    print(f"        image preserved: {(dest/'45316975_001.jpg').exists()}")
+print(f"still in open/: {[p.name for p in (tmp/'open'/'Audi A4'/'FRONT'/'iaai').iterdir()]}")
+
+# relist: the sold lot comes back -> must move BACK to open, not duplicate
+got,src=P.resolve_folder("iaai","45316975","WAUKMAF44JN015356","FRONT","Audi A4",
+                         "2018","2000mi","", bucket="open")
+print(f"\nrelist -> {got.relative_to(tmp)}")
+print(f"   moved from: {src}")
+print(f"   image preserved: {(got/'45316975_001.jpg').exists()}")
+print(f"   sold/ now empty: {not any((tmp/'sold').rglob('*.jpg'))}")
+shutil.rmtree(tmp)
+PY
+```
+
+*Result*
+```
+moved:
+   open/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+     -> sold/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356   [sold_at_auction $21025.0]
+        image preserved: True
+still in open/: ['2019-1000mi-45111111-WAUAAAAAAAA111111']
+
+relist -> open/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+   moved from: sold/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+   image preserved: True
+   sold/ now empty: True
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Exactly the path you specified, and the relist round-trip works. Running a real cut to confirm nothing regressed:
+
+<details>
+<summary>**Tool — Bash**: Verify the merge changes on a real cut</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+mkdir -p images/sold && touch images/sold/.gitkeep
+python analytics/scripts/data_pull_01.py iaai \
+  analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_2018_audi_a5_20260816T093056.json \
+  analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_audi_a5_2019_2023_20260816T100259.json \
+  --tier 2 --seller-class insurance --exclude-body-style coupe,convertible \
+  --max-odometer 100000 --max-distance 3000 --history \
+  --out audi_a5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi.csv 2>&1 \
+  | grep -E "unique lots|kept |Done|CSV ->"
+python - <<'PY'
+import csv, glob, collections
+p=sorted(glob.glob("analytics/data/open/csv-cut/iaai/audi_a5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_*.csv"))[-1]
+rows=list(csv.DictReader(open(p)))
+lots=collections.Counter(r["lot_number"] for r in rows)
+print(f"\n  {len(rows)} rows / {len(lots)} distinct lots / duplicates: "
+      f"{ss if (ss:={k:v for k,v in lots.items() if v>1}) else 'none'}")
+print(f"  rows with ACV        : {sum(1 for r in rows if r['acv_usd'])}")
+print(f"  rows with listing_state: {sum(1 for r in rows if r['listing_state'])}")
+print(f"  rows with auction_at : {sum(1 for r in rows if r['auction_at'])}")
+PY
+```
+
+*Result*
+```
+  unique lots: 180   (dropped 388 duplicate row(s))
+  kept 84   filtered out 96
+Done. 84 row(s) x 88 column(s)
+  CSV -> /home/striker/projects/car-bid-tracker/analytics/data/open/csv-cut/iaai/audi_a5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260817T105330.csv
+
+  84 rows / 84 distinct lots / duplicates: none
+  rows with ACV        : 60
+  rows with listing_state: 84
+  rows with auction_at : 84
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Document all three changes and rebuild transcript</summary>
+
+````bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/schema/iaai_csv_schema.md"); s=p.read_text(encoding="utf-8")
+
+s=s.replace("""Which forces one change in stage 3: **de-dupe is richest-first, then newest.**
+Straight newest-wins would let a 1-request search pull shadow a full record and
+blank ACV, repair estimate and damage codes. Static fields do not change between
+pulls anyway, and the fields that do move are captured in the history columns.
+Verified: lot 45856028 survives from the full 08-14 08:56 archive with its
+odometer and damage intact, even though the newest snapshot holds only a thin
+record for it.""",
+"""### De-dupe key: the first 11 VIN characters, not the whole VIN
+
+IAAI masks the last 6, so the SAME lot is `WAUENCF5XJA******` from a web pull and
+`WAUENCF5XJA060484` once Apibara resolves it. Keying on the full VIN files those
+as two different cars:
+
+```
+lot 45738201   enriched WAUENCF54JA009708 / web-only WAUENCF54JA******
+   full-VIN key -> 2 distinct  => lot emitted TWICE
+   11-char key  -> 1 distinct  => lot emitted ONCE
+```
+
+The unmasked 11 are the portion both sources always agree on. Current cuts happen
+to contain no duplicates only because every archive on disk has been enriched;
+the next web-only pull alongside an older enriched archive would have produced
+them.
+
+### Merging repeat sightings: static from the richest, volatile from the newest
+
+Neither newest-wins nor richest-wins is right on its own:
+
+| strategy | failure |
+|---|---|
+| newest-wins | a 1-request search pull carries no ACV, repair estimate or damage codes, so being newest it **blanks them** |
+| richest-wins | a full pull from yesterday then shadows today's `listing_state`, `auction_at` and `buy_now_usd` — the row **looks current and is not** |
+
+So `merge_observations()` takes the richest record as the base and overlays the
+`auction` and `pricing` blocks plus `_web_state` from the newest. Identity fields
+that only ever improve — VIN, seller name — take the better value from either,
+so a masked re-pull can never overwrite a resolved VIN.
+
+```
+richest (08-16, full)   ACV 17,975   state Prebid          auction 08-18   buy-now -
+newest  (08-17, search) ACV -        state Prebid/BuyNow   auction 08-21   buy-now 7,600
+merged                  ACV 17,975   state Prebid/BuyNow   auction 08-21   buy-now 7,600
+```
+
+`pulled_at` and `source_file` describe **currency** — they name the newest
+sighting, because that is what the row's live fields are as of. The static detail
+may have been captured earlier in the same cohort; `_merged_from` records every
+file involved, and `--history` gives the full span via `first_seen_at` /
+`last_seen_at`.""")
+p.write_text(s, encoding="utf-8"); print("dedupe/merge documented")
+PY
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/schema/iaai_csv_schema.md"); s=p.read_text(encoding="utf-8")
+s=s.replace("""### Note on which lots have photos at all""",
+"""### Departed lots are archived, not pruned
+
+```bash
+python analytics/scripts/pull_images_01.py CUT.csv --archive-sold
+```
+
+Photos of a lot that sold are the most valuable thing in the tree — they are the
+comp. Deleting them would be worse than useless, and leaving them under `open/`
+makes that tree a lie about what is biddable. So they move to `images/sold/`
+keeping the identical shape, which makes an open folder and its sold counterpart
+directly comparable:
+
+```
+images/open/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+images/sold/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+```
+
+"Departed" is `exit_state == 'gone'` from `lot_history_01.py`, which is
+scope-aware: a lot is only called gone when a later, non-truncated snapshot that
+actually covered its market **and** its search keyword failed to contain it. That
+matters here because the move is close to destructive — a false positive buries a
+live lot in the sold archive.
+
+**A relist reverses it.** `existing_dirs()` searches both buckets, so a lot that
+comes back is found under `sold/` and moved to `open/` by the next image run
+rather than being downloaded again. Verified round-trip in both directions with
+the photos preserved.
+
+### Note on which lots have photos at all""")
+p.write_text(s, encoding="utf-8"); print("sold archive documented")
+PY
+python analytics/scripts/build_chat_transcript.py 2>&1 | tail -1
+wc -l analytics/schema/iaai_csv_schema.md
+````
+
+*Result*
+```
+dedupe/merge documented
+sold archive documented
+  76 prompts, 2,553,260 chars, 58,874 lines, 2.56 MB
+1481 analytics/schema/iaai_csv_schema.md
+```
+
+</details>
+
+<details>
+<summary>*[todo list — 4 items]*</summary>
+
+```json
+[
+  {
+    "content": "Fix dedupe key: use 11-char VIN prefix instead of full VIN",
+    "status": "completed",
+    "activeForm": "Fixing the dedupe key"
+  },
+  {
+    "content": "Replace richest-wins with field-level merge (static from richest, volatile from newest)",
+    "status": "completed",
+    "activeForm": "Implementing field-level merge"
+  },
+  {
+    "content": "Add images/sold/ archive and move departed lots there",
+    "status": "in_progress",
+    "activeForm": "Adding the sold image archive"
+  },
+  {
+    "content": "Verify all three against real data, update schema doc and transcript",
+    "status": "pending",
+    "activeForm": "Verifying and documenting"
+  }
+]
+```
+</details>
+
+You've hit your monthly spend limit · raise it at claude.ai/settings/usage?from=cc_cli_limit_message
+
+## Prompt 77
+
+```
+lets finish prior prompt ask for 1)-3) run 
+adding 4) lets use data coming of "vehicle_grade" which is iaai official image base assessement
+renaming this CSV column to iaa_vehicle_score, retaining the raw value, and adding a derived iaa_vehicle_score_band based on official IAA which describes it as an automated computer-vision assessment of visible damage severity based on check-in photos. Higher is better—not more damaged, and not a percentage. IAA’s official score flyer defines:
+0–9: non-repairable
+10–19: severe damage
+20–29: major damage
+30–39: moderate damage
+40–49: minor damage
+50: little damage
+lets use the bands based on same official names
+5) lets add this score to our image folder for iaai platform which will become for early example 
+2019-2500mi-lot#-vin#-score#-$7200
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+Let me look at the actual `vehicle_grade` values before wiring the bands:
+
+<details>
+<summary>**Tool — Bash**: Inspect vehicle_grade values</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import csv, glob, collections
+v=collections.Counter(); n=0
+for p in glob.glob("analytics/data/*/csv-raw/iaai/*.csv"):
+    for r in csv.DictReader(open(p)):
+        n+=1; v[r.get("vehicle_grade") or "(blank)"]+=1
+print(f"{n} rows;  vehicle_grade distinct values: {len(v)}")
+nums=sorted((float(k) for k in v if k!="(blank)"))
+print(f"  range {min(nums)} .. {max(nums)}   blank {v['(blank)']}")
+print("  distribution:", dict(sorted(((k,c) for k,c in v.items() if k!='(blank)'),
+                                     key=lambda kv: float(kv[0]))))
+PY
+```
+
+*Result*
+```
+2679 rows;  vehicle_grade distinct values: 51
+  range 0.0 .. 50.0   blank 209
+  distribution: {'0': 35, '1': 14, '3': 7, '4': 4, '5': 7, '6': 6, '7': 1, '8': 14, '9': 5, '10': 40, '11': 25, '12': 73, '13': 22, '14': 37, '15': 43, '16': 58, '17': 49, '18': 44, '19': 38, '20': 48, '21': 60, '22': 22, '23': 55, '24': 36, '25': 62, '26': 118, '27': 74, '28': 28, '29': 36, '30': 28, '31': 87, '32': 109, '33': 38, '34': 42, '35': 53, '36': 61, '37': 93, '38': 104, '39': 27, '40': 19, '41': 27, '42': 73, '43': 77, '44': 47, '45': 30, '46': 16, '47': 31, '48': 97, '49': 92, '50': 258}
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Matches the official 0–50 scale exactly. Implementing the rename and bands:
+
+<details>
+<summary>**Tool — Bash**: Add the score column and bands</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/apibara_json2csv_iaai_01.py"); s=p.read_text(encoding="utf-8")
+
+BANDS = '''
+# --------------------------------------------------------------------------
+# derived: IAA vehicle score band
+# --------------------------------------------------------------------------
+# IAA's own automated computer-vision assessment of visible damage severity,
+# from the check-in photos. Two things about it are easy to get backwards:
+# HIGHER IS BETTER (50 is the least damaged, 0 the worst), and it is NOT a
+# percentage of anything. Band names and boundaries are IAA's, from their score
+# flyer — kept verbatim rather than paraphrased so a row can be checked against
+# the official document.
+_SCORE_BANDS = (
+    (0, 9, "non-repairable"),
+    (10, 19, "severe damage"),
+    (20, 29, "major damage"),
+    (30, 39, "moderate damage"),
+    (40, 49, "minor damage"),
+    (50, 50, "little damage"),
+)
+
+
+def vehicle_score(v):
+    """IAA's 0-50 score as a number, or None when not assessed."""
+    raw = clean(attrs(v).get("VehicleGrade"))
+    if raw is None:
+        return None
+    try:
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def vehicle_score_band(v):
+    """-> IAA's band name, or '' when the lot carries no score.
+
+    Blank stays blank rather than collapsing into the worst band: "not assessed"
+    and "assessed as non-repairable" are opposite facts, and 209 of 2,679 rows
+    have no score at all.
+    """
+    n = vehicle_score(v)
+    if n is None:
+        return ""
+    for lo, hi, name in _SCORE_BANDS:
+        if lo <= n <= hi:
+            return name
+    return ""
+
+
+'''
+s=s.replace("# --------------------------------------------------------------------------\n# derived: damage grouping", BANDS + "# --------------------------------------------------------------------------\n# derived: damage grouping",1)
+
+s=s.replace('''    ("vehicle_grade",       lambda v: clean(attrs(v).get("VehicleGrade")),    "raw"),''',
+'''    # IAA's own photo-based damage score. Renamed from `vehicle_grade` because
+    # "grade" reads like a letter grade or a percentage and this is neither.
+    ("iaa_vehicle_score",   vehicle_score,                                    "raw"),
+    ("iaa_vehicle_score_band", vehicle_score_band,                            "calc"),''',1)
+s=s.replace('''    "vehicle_grade": "details.attributes.VehicleGrade",''',
+'''    "iaa_vehicle_score": "details.attributes.VehicleGrade — IAA photo score, 0-50, HIGHER IS BETTER",
+    "iaa_vehicle_score_band": "IAA band name for the score (non-repairable .. little damage)",''',1)
+p.write_text(s, encoding="utf-8"); print("patched flattener")
+PY
+python -m py_compile analytics/scripts/apibara_json2csv_iaai_01.py && echo "compile OK"
+python - <<'PY'
+import sys; sys.path.insert(0,"analytics/scripts")
+from apibara_json2csv_iaai_01 import vehicle_score_band as B
+mk=lambda g: {"details":{"attributes":{"VehicleGrade":g}}}
+for g in [0,9,10,19,20,29,30,39,40,49,50,None,""]:
+    print(f"   score {str(g):<6} -> {B(mk(g))!r}")
+PY
+```
+
+*Result*
+```
+patched flattener
+compile OK
+   score 0      -> 'non-repairable'
+   score 9      -> 'non-repairable'
+   score 10     -> 'severe damage'
+   score 19     -> 'severe damage'
+   score 20     -> 'major damage'
+   score 29     -> 'major damage'
+   score 30     -> 'moderate damage'
+   score 39     -> 'moderate damage'
+   score 40     -> 'minor damage'
+   score 49     -> 'minor damage'
+   score 50     -> 'little damage'
+   score None   -> ''
+   score        -> ''
+```
+
+</details>
+
+Bands map exactly to the official boundaries. Now the folder segment:
+
+<details>
+<summary>**Tool — Bash**: Add the score segment to naming and parsing</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+
+s=s.replace('''_YEAR_SEG = re.compile(r"^(?:19|20)\\d{2}$")
+_DIST_SEG = re.compile(r"^(\\d+)mi$")''',
+'''_YEAR_SEG = re.compile(r"^(?:19|20)\\d{2}$")
+_DIST_SEG = re.compile(r"^(\\d+)mi$")
+_SCORE_SEG = re.compile(r"^score(\\d{1,2})$")
+
+
+def score_tag(score):
+    """38 -> 'score38'. Prefixed on purpose.
+
+    A bare number would be ambiguous against the year and lot segments, which
+    are also digits — and this parser identifies segments by shape, not
+    position. The prefix also makes the folder self-describing: `score38` needs
+    no legend, `38` does.
+    """
+    try:
+        n = int(float(str(score).strip()))
+    except (TypeError, ValueError):
+        return ""
+    return f"score{n}" if 0 <= n <= 50 else ""''',1)
+
+s=s.replace('''def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x"):''',
+'''def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None):''',1)
+s=s.replace('''    parts += [str(lot), vin]
+    bn = money_tag(buy_now)''',
+'''    parts += [str(lot), vin]
+    sc = score_tag(score)
+    if sc:
+        parts.append(sc)
+    bn = money_tag(buy_now)''',1)
+
+s=s.replace('''    parts = [p for p in str(name).split("-") if p]
+    year = next((p for p in parts if _YEAR_SEG.match(p)), "")
+    dist = next((p for p in parts if _DIST_SEG.match(p)), "")
+    bn = next((p for p in parts if p.startswith("$")), "")
+    used = {year, dist, bn}
+    rest = [p for p in parts if p not in used]
+    lot = next((p for p in rest if p.isdigit()), "")
+    vin = next((p for p in rest if not p.isdigit() and not p.startswith("$")), "")
+    return lot, vin, year, dist, bn''',
+'''    parts = [p for p in str(name).split("-") if p]
+    year = next((p for p in parts if _YEAR_SEG.match(p)), "")
+    dist = next((p for p in parts if _DIST_SEG.match(p)), "")
+    bn = next((p for p in parts if p.startswith("$")), "")
+    # score BEFORE vin: `score38` contains letters and would otherwise be
+    # mistaken for the VIN, which is "the token with letters in it".
+    score = next((p for p in parts if _SCORE_SEG.match(p)), "")
+    used = {year, dist, bn, score}
+    rest = [p for p in parts if p not in used]
+    lot = next((p for p in rest if p.isdigit()), "")
+    vin = next((p for p in rest if not p.isdigit() and not p.startswith("$")), "")
+    return lot, vin, year, dist, bn, score''',1)
+p.write_text(s, encoding="utf-8"); print("patched naming")
+PY
+grep -n "parse_folder_name(" analytics/scripts/pull_images_01.py | head
+```
+
+*Result*
+```
+patched naming
+187:def parse_folder_name(name):
+253:            if p.is_dir() and parse_folder_name(p.name)[0] == str(lot):
+290:        _, old_vin, _, _, _ = parse_folder_name(old.name)
+291:        _, new_vin, _, _, _ = parse_folder_name(want.name)
+364:        lot = parse_folder_name(folder.name)[0]
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Thread score through and verify parsing</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+# unpack sites now return 6 values
+s=s.replace("        _, old_vin, _, _, _ = parse_folder_name(old.name)\n        _, new_vin, _, _, _ = parse_folder_name(want.name)",
+            "        _, old_vin, *_ = parse_folder_name(old.name)\n        _, new_vin, *_ = parse_folder_name(want.name)",1)
+# thread score through lot_dir / resolve_folder
+s=s.replace('''def lot_dir(platform, lot, vin, group, model, year="", dist_bucket="",
+            buy_now="", mask_char="x", bucket="open"):
+    return (IMAGES_ROOT / bucket / model / group / platform
+            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char))''',
+'''def lot_dir(platform, lot, vin, group, model, year="", dist_bucket="",
+            buy_now="", mask_char="x", bucket="open", score=None):
+    return (IMAGES_ROOT / bucket / model / group / platform
+            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char, score))''',1)
+s=s.replace('''def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                   buy_now="", mask_char="x", apply=True, bucket="open"):''',
+'''def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                   buy_now="", mask_char="x", apply=True, bucket="open",
+                   score=None):''',1)
+s=s.replace('''    return _resolve_folder(platform, lot, vin, group, model, year, dist_bucket,
+                           buy_now, mask_char, apply, bucket)''',
+'''    return _resolve_folder(platform, lot, vin, group, model, year, dist_bucket,
+                           buy_now, mask_char, apply, bucket, score)''',1)
+s=s.replace('''def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                    buy_now="", mask_char="x", apply=True, bucket="open"):''',
+'''def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                    buy_now="", mask_char="x", apply=True, bucket="open",
+                    score=None):''',1)
+s=s.replace('''    want = lot_dir(platform, lot, vin, group, model, year, dist_bucket, buy_now,
+                   mask_char, bucket)''',
+'''    want = lot_dir(platform, lot, vin, group, model, year, dist_bucket, buy_now,
+                   mask_char, bucket, score)''',1)
+s=s.replace('''            target = want.parent / folder_name(lot, old_vin, year, dist_bucket,
+                                               buy_now, mask_char)''',
+'''            target = want.parent / folder_name(lot, old_vin, year, dist_bucket,
+                                               buy_now, mask_char, score)''',1)
+# call sites pass the score
+s=s.replace('''                model_folder, r.get("year"), r.get("distance_bucket"),
+                r.get("buy_now_usd"), args.mask_char, apply=False)''',
+'''                model_folder, r.get("year"), r.get("distance_bucket"),
+                r.get("buy_now_usd"), args.mask_char, apply=False,
+                score=r.get("iaa_vehicle_score"))''',1)
+s=s.replace('''                model_folder, r.get("year"), r.get("distance_bucket"),
+                r.get("buy_now_usd"), args.mask_char)''',
+'''                model_folder, r.get("year"), r.get("distance_bucket"),
+                r.get("buy_now_usd"), args.mask_char,
+                score=r.get("iaa_vehicle_score"))''',1)
+s=s.replace('''[-{{year}}][-{{dist}}][-${{buynow}}]/")''',
+            '''[-{{year}}][-{{dist}}][-score{{N}}][-${{buynow}}]/")''',1)
+p.write_text(s, encoding="utf-8"); print("threaded")
+PY
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+python - <<'PY'
+import sys; sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+print("=== naming ===")
+for a in [("45704693","WAUENCF5XJA060484","2019","2500mi","7200","x",38),
+          ("45704693","WAUENCF5XJA060484","2019","250mi","","x",50),
+          ("45704693","WAUENCF5XJAxxxxxx","2018","750mi","","x",None),
+          ("45704693","WAUENCF5XJA060484","2019","2500mi","7200","x",0)]:
+    print("  ", P.folder_name(*a))
+print("\n=== parse: score must not be mistaken for the VIN ===")
+for n in ["2019-2500mi-45704693-WAUENCF5XJA060484-score38-$7200",
+          "2019-0250mi-45704693-WAUENCF5XJAxxxxxx-score50",
+          "2019-2500mi-45704693-WAUENCF5XJA060484-$7200",
+          "45704693-WAUENCF5XJA060484"]:
+    lot,vin,y,d,b,sc=P.parse_folder_name(n)
+    print(f"  {n:<56} lot={lot:<9} vin={vin:<18} masked={P.is_masked_vin(vin)} sc={sc!r} bn={b!r}")
+PY
+```
+
+*Result*
+```
+threaded
+compile OK
+=== naming ===
+   2019-2500mi-45704693-WAUENCF5XJA060484-score38-$7200
+   2019-0250mi-45704693-WAUENCF5XJA060484-score50
+   2018-0750mi-45704693-WAUENCF5XJAxxxxxx
+   2019-2500mi-45704693-WAUENCF5XJA060484-score0-$7200
+
+=== parse: score must not be mistaken for the VIN ===
+  2019-2500mi-45704693-WAUENCF5XJA060484-score38-$7200     lot=45704693  vin=WAUENCF5XJA060484  masked=False sc='score38' bn='$7200'
+  2019-0250mi-45704693-WAUENCF5XJAxxxxxx-score50           lot=45704693  vin=WAUENCF5XJAxxxxxx  masked=True sc='score50' bn=''
+  2019-2500mi-45704693-WAUENCF5XJA060484-$7200             lot=45704693  vin=WAUENCF5XJA060484  masked=False sc='' bn='$7200'
+  45704693-WAUENCF5XJA060484                               lot=45704693  vin=WAUENCF5XJA060484  masked=False sc='' bn=''
+```
+
+</details>
+
+Regenerating CSVs and migrating the tree:
+
+<details>
+<summary>**Tool — Bash**: Regenerate CSVs with the score band</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+for f in analytics/data/*/json-raw/iaai/apibara_*.json analytics/data/*/json-adapted/iaai/adapted_*.json; do
+  python analytics/scripts/apibara_json2csv_iaai_01.py "$f" >/dev/null 2>&1
+done
+python - <<'PY'
+import csv, glob, collections
+b=collections.Counter(); n=0
+for p in glob.glob("analytics/data/*/csv-raw/iaai/*.csv"):
+    for r in csv.DictReader(open(p)):
+        n+=1; b[r["iaa_vehicle_score_band"] or "(not assessed)"]+=1
+order=["little damage","minor damage","moderate damage","major damage","severe damage","non-repairable","(not assessed)"]
+print(f"{n} rows — iaa_vehicle_score_band")
+for k in order:
+    if k in b: print(f"   {b[k]:>5}  {k}")
+PY
+```
+
+*Result*
+```
+2781 rows — iaa_vehicle_score_band
+     278  little damage
+     534  minor damage
+     661  moderate damage
+     559  major damage
+     441  severe damage
+      97  non-repairable
+     211  (not assessed)
+```
+
+</details>
+
+<details>
+<summary>*[todo list — 4 items]*</summary>
+
+```json
+[
+  {
+    "content": "Fix dedupe key: use 11-char VIN prefix instead of full VIN",
+    "status": "completed",
+    "activeForm": "Fixing the dedupe key"
+  },
+  {
+    "content": "Replace richest-wins with field-level merge (static from richest, volatile from newest)",
+    "status": "completed",
+    "activeForm": "Implementing field-level merge"
+  },
+  {
+    "content": "Add images/sold/ archive and move departed lots there",
+    "status": "in_progress",
+    "activeForm": "Adding the sold image archive"
+  },
+  {
+    "content": "Verify all three against real data, update schema doc and transcript",
+    "status": "pending",
+    "activeForm": "Verifying and documenting"
+  }
+]
+```
+</details>
+
+<details>
+<summary>**Tool — Bash**: Migrate folders to include the score</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys, csv, glob, re, pathlib
+sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+best={}
+for p in sorted(glob.glob("analytics/data/*/csv-raw/iaai/*.csv"),
+                key=lambda x: pathlib.Path(x).stat().st_mtime):
+    for r in csv.DictReader(open(p)): best[r["lot_number"]]=r
+dirs=sorted(glob.glob("images/open/*/*/iaai/*/"))
+print(f"{len(dirs)} lot folders\n")
+moved=same=unknown=noscore=0
+for d in dirs:
+    d=pathlib.Path(d); cur_model=d.parents[2].name
+    lot,vin,*_ = P.parse_folder_name(d.name)
+    r=best.get(lot)
+    if not r: unknown+=1; continue
+    if not r.get("iaa_vehicle_score"): noscore+=1
+    kw=re.sub(r"^\s*(19|20)\d{2}\s+","",r.get("search_keyword") or "").strip()
+    dest,src = P.resolve_folder("iaai", lot, r.get("vin") or vin, P.group_of(r),
+                                kw or cur_model, r.get("year"),
+                                r.get("distance_bucket"), r.get("buy_now_usd"),
+                                score=r.get("iaa_vehicle_score"))
+    moved += bool(src); same += (not src)
+print(f"  renamed {moved}, already correct {same}, unknown {unknown}")
+print(f"  lots with no score (segment omitted): {noscore}")
+PY
+```
+
+*Result*
+```
+314 lot folders
+
+  renamed 314, already correct 0, unknown 0
+  lots with no score (segment omitted): 0
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Verify the migrated tree with scores</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys, glob, os, collections; sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+dirs=sorted(glob.glob("images/*/*/*/iaai/*/"))
+lots=collections.Counter(P.parse_folder_name(os.path.basename(d.rstrip('/')))[0] for d in dirs)
+fs=glob.glob("images/**/*.jpg", recursive=True)
+sc=sum(1 for d in dirs if P.parse_folder_name(os.path.basename(d.rstrip('/')))[5])
+print(f"  {len(dirs)} folders / {len(lots)} distinct lots / duplicates: "
+      f"{ss if (ss:={k:v for k,v in lots.items() if v>1}) else 'none'}")
+print(f"  {len(fs)} images, {sum(os.path.getsize(f) for f in fs)/1e9:.2f} GB")
+print(f"  with score segment: {sc}/{len(dirs)}")
+PY
+echo
+echo "=== Audi A5 / FRONT ==="
+ls "images/open/Audi A5/FRONT/iaai" | head -6
+echo
+echo "=== a high-score and a low-score lot ==="
+find images/open -type d -name '*score50*' | head -2
+find images/open -type d -name '*score0-*' -o -type d -name '*score[0-9]' | head -2
+```
+
+*Result*
+```
+  314 folders / 314 distinct lots / duplicates: none
+  5207 images, 1.73 GB
+  with score segment: 314/314
+
+=== Audi A5 / FRONT ===
+2018-1250mi-45662018-WAUENCF51JA104260-score10
+2018-2250mi-45490663-WAUENCF55JA084384-score32
+2018-2250mi-45681606-WAUENCF50JAxxxxxx-score18
+2018-2500mi-44874926-WAUANCF56JAxxxxxx-score37
+2018-2500mi-45687563-WAUENCF55JAxxxxxx-score38
+2018-2750mi-45521986-WAUANCF56JAxxxxxx-score25
+
+=== a high-score and a low-score lot ===
+images/open/Audi RS 5/OTHER/iaai/2023-3000mi-45806076-WUAG4DGY5PAxxxxxx-score50
+images/open/Audi S4/FRONT/iaai/2018-2500mi-45577626-WAUB4AF49JAxxxxxx-score50
+images/open/Audi S4/OTHER/iaai/2018-1000mi-45719990-WAUB4AF44JAxxxxxx-score0
+images/open/Audi S5/FRONT/iaai/2019-2750mi-45639957-WAUC4CF51KAxxxxxx-score8
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Document the score and rebuild transcript</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/schema/iaai_csv_schema.md"); s=p.read_text(encoding="utf-8")
+s=s.replace("| `vehicle_grade` | raw | `details.attributes.VehicleGrade` | 70/70 |",
+"""| `iaa_vehicle_score` | raw | `details.attributes.VehicleGrade` | 2570/2781 |
+| `iaa_vehicle_score_band` | calc | IAA band name for the score | same |""")
+s=s.replace("### Damage grouping",
+"""### IAA vehicle score
+
+IAA's own automated computer-vision assessment of visible damage severity, taken
+from the check-in photos. Two things are easy to get backwards:
+
+- **Higher is better.** 50 is the least damaged, 0 the worst.
+- **It is not a percentage** of anything.
+
+Renamed from `vehicle_grade`, which read like a letter grade or a proportion and
+is neither. The raw 0-50 value is retained; `iaa_vehicle_score_band` carries
+IAA's own band names, verbatim from their score flyer:
+
+| score | band | rows |
+|---|---|---|
+| 50 | `little damage` | 278 |
+| 40-49 | `minor damage` | 534 |
+| 30-39 | `moderate damage` | 661 |
+| 20-29 | `major damage` | 559 |
+| 10-19 | `severe damage` | 441 |
+| 0-9 | `non-repairable` | 97 |
+| *(blank)* | not assessed | 211 |
+
+Observed values are integers spanning the full 0-50 range, so the scale in the
+data matches the published one exactly.
+
+**Blank stays blank rather than collapsing into `non-repairable`.** "Not
+assessed" and "assessed as non-repairable" are opposite facts, and 211 of 2,781
+rows carry no score — folding them together would invent 211 write-offs.
+
+### Damage grouping""",1)
+p.write_text(s, encoding="utf-8"); print("score documented")
+PY
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/schema/iaai_csv_schema.md"); s=p.read_text(encoding="utf-8")
+s=s.replace("""images/open/Audi A5/FRONT/iaai/2018-1250mi-45662018-WAUENCF51JA104260
+images/open/Audi A5/FRONT/iaai/2018-3000mi-45704693-WAUENCF5XJA060484-$7600
+images/open/Audi A5/FRONT/iaai/2021-0250mi-45354112-WAUDACF58MAxxxxxx-$6750""",
+"""images/open/Audi A5/FRONT/iaai/2018-1250mi-45662018-WAUENCF51JA104260-score10
+images/open/Audi A5/FRONT/iaai/2018-2250mi-45490663-WAUENCF55JA084384-score32
+images/open/Audi S4/OTHER/iaai/2018-1000mi-45719990-WAUB4AF44JAxxxxxx-score0""")
+s=s.replace("""{year}-{dist}-{lot}-{vin}            gen 4 (current)""",
+"""{year}-{dist}-{lot}-{vin}            gen 4
+{year}-{dist}-{lot}-{vin}-score{N}   gen 5 (current)""")
+s=s.replace("""[{year}-][{dist}-]{lot}-{vin}[-${buynow}]/{lot}_001.jpg""",
+            """[{year}-][{dist}-]{lot}-{vin}[-score{N}][-${buynow}]/{lot}_001.jpg""")
+s=s.replace("""distance is digits + `mi`, a Buy Now starts with `$`, the lot is the remaining
+all-digit token, the VIN is the token containing letters.""",
+"""distance is digits + `mi`, a score is `score` + digits, a Buy Now starts with
+`$`, the lot is the remaining all-digit token, the VIN is the token containing
+letters. The score is matched **before** the VIN — `score38` contains letters and
+would otherwise be taken for the VIN. It is prefixed rather than bare for the
+same reason a bare `38` would be ambiguous against the year and lot segments.""")
+p.write_text(s, encoding="utf-8"); print("folder naming updated")
+PY
+python analytics/scripts/build_chat_transcript.py 2>&1 | tail -1
+wc -l analytics/schema/iaai_csv_schema.md
+```
+
+*Result*
+```
+score documented
+folder naming updated
+  77 prompts, 2,577,635 chars, 59,475 lines, 2.59 MB
+1514 analytics/schema/iaai_csv_schema.md
+```
+
+</details>
+
+<details>
+<summary>**Tool — TodoWrite**</summary>
+
+```json
+{
+  "todos": [
+    {
+      "content": "Fix dedupe key: use 11-char VIN prefix instead of full VIN",
+      "status": "completed",
+      "activeForm": "Fixing the dedupe key"
+    },
+    {
+      "content": "Replace richest-wins with field-level merge (static from richest, volatile from newest)",
+      "status": "completed",
+      "activeForm": "Implementing field-level merge"
+    },
+    {
+      "content": "Add images/sold/ archive and move departed lots there",
+      "status": "completed",
+      "activeForm": "Adding the sold image archive"
+    },
+    {
+      "content": "Add iaa_vehicle_score + band column, rename from vehicle_grade",
+      "status": "completed",
+      "activeForm": "Adding the IAA vehicle score"
+    },
+    {
+      "content": "Add score to image folder names and migrate the tree",
+      "status": "completed",
+      "activeForm": "Adding score to folder names"
+    },
+    {
+      "content": "Verify all five against real data, update schema doc and transcript",
+      "status": "completed",
+      "activeForm": "Verifying and documenting"
+    }
+  ]
+}
+```
+
+*Result*
+```
+Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable
+```
+
+</details>
+
+All five done.
+
+## 1 — Dedupe key: 11-char VIN prefix
+
+The failure mode was latent, so I reproduced it against a real record before and after:
+
+```
+lot 45738201   enriched WAUENCF54JA009708 / web-only WAUENCF54JA******
+   full-VIN key -> 2 distinct  => lot emitted TWICE
+   11-char key  -> 1 distinct  => lot emitted ONCE
+```
+
+Zero lots currently carry both forms — only because every archive on disk has been enriched. Your next web-only pull alongside an older enriched archive would have produced duplicates.
+
+## 2 — Field-level merge
+
+You were right that richest-wins leaves volatile fields stale. `merge_observations()` now takes the richest record as the base and overlays `auction` + `pricing` + `_web_state` from the newest:
+
+```
+richest (08-16, full)   ACV 17,975   state Prebid          auction 08-18   buy-now -
+newest  (08-17, search) ACV -        state Prebid/BuyNow   auction 08-21   buy-now 7,600
+merged                  ACV 17,975   state Prebid/BuyNow   auction 08-21   buy-now 7,600
+```
+
+VIN and seller name take the *better* value rather than the newer one, so a masked re-pull can't overwrite a resolved VIN. `pulled_at`/`source_file` now mean **currency** (newest sighting); `_merged_from` records every file involved.
+
+Real cut: 84 rows, 84 distinct lots, no duplicates, all 84 with `listing_state` and `auction_at`.
+
+## 3 — `images/sold/`
+
+```bash
+python analytics/scripts/pull_images_01.py CUT.csv --archive-sold
+```
+
+Moves departed lots to the identical shape you specified:
+
+```
+images/open/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+images/sold/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356
+```
+
+It reports **0 to move right now** — I verified that's correct, not a no-op: all 314 folder lots are `still_listed`. The 1,345 `gone` lots are Apibara `ended` records that never had folders. Sandbox-tested both directions, including the **relist round-trip** — a sold lot that comes back is found under `sold/` and moved to `open/` rather than re-downloaded.
+
+Departure uses `exit_state == 'gone'`, which is scope-aware — that matters here because a false positive would bury a live lot.
+
+## 4 — `iaa_vehicle_score` + band
+
+Renamed from `vehicle_grade`, raw 0–50 retained, band names verbatim from IAA's flyer:
+
+```
+278  little damage       (50)
+534  minor damage        (40-49)
+661  moderate damage     (30-39)
+559  major damage        (20-29)
+441  severe damage       (10-19)
+ 97  non-repairable      (0-9)
+211  not assessed        (blank)
+```
+
+Observed values are integers across the full 0–50 range, so the data matches the published scale exactly.
+
+**Blank stays blank rather than becoming `non-repairable`** — "not assessed" and "assessed as a write-off" are opposite facts, and folding them would have invented 211 write-offs.
+
+## 5 — Score in folder names, all 314 migrated
+
+```
+2018-1250mi-45662018-WAUENCF51JA104260-score10
+2018-2250mi-45490663-WAUENCF55JA084384-score32
+2018-1000mi-45719990-WAUB4AF44JAxxxxxx-score0
+```
+
+One choice worth flagging: I prefixed it (`score38`, not `38`). A bare number would be ambiguous against the year and lot segments, since parsing is shape-based. It also required matching the score **before** the VIN — `score38` contains letters and would otherwise be read as the VIN, which would have broken masked-VIN detection and forked folders on the next enrichment.
+
+314 folders, 314 distinct lots, no duplicates, 5,207 images, 1.73 GB. Schema doc at 1,514 lines; transcript at 77 prompts, 2.59 MB.
+
+## Prompt 78
+
+```
+lets fix (5) I don't like score38 example, the idea is to keep score in two digit format (38) when score is available and add no score after vin# in folder name if this field is blank at the moment
+you need to take into account that score# may show up on the Action not Assigned lot later after IAAI run the metric against lot images and update folder name when it is available
+FYI to solve parsing issue you should take into account that lot# and vin# are both fix base character #s which can be leveraged in parsing 
+pls redo and change folder names when needed accross image sets available in images\open like
+Audi A4
+Audi A5
+Audi RS 5
+Audi S4
+Audi S5
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+Let me verify the fixed-length assumption before relying on it for parsing:
+
+<details>
+<summary>**Tool — Bash**: Check whether lot and VIN really are fixed-length</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import csv, glob, collections
+lot_len=collections.Counter(); vin_len=collections.Counter(); score_len=collections.Counter()
+for p in glob.glob("analytics/data/*/csv-raw/iaai/*.csv"):
+    for r in csv.DictReader(open(p)):
+        l=str(r.get("lot_number") or "").strip()
+        v=str(r.get("vin") or "").strip()
+        s=str(r.get("iaa_vehicle_score") or "").strip()
+        if l: lot_len[len(l)]+=1
+        if v: vin_len[len(v)]+=1
+        if s: score_len[len(s)]+=1
+print("lot_number lengths :", dict(sorted(lot_len.items())))
+print("vin lengths        :", dict(sorted(vin_len.items())))
+print("score digit counts :", dict(sorted(score_len.items())))
+print()
+# any lot that is NOT 8 digits?
+odd=set()
+for p in glob.glob("analytics/data/*/csv-raw/iaai/*.csv"):
+    for r in csv.DictReader(open(p)):
+        l=str(r.get("lot_number") or "").strip()
+        if l and (len(l)!=8 or not l.isdigit()): odd.add(l)
+print("lot numbers that are not exactly 8 digits:", sorted(odd)[:10] or "none")
+PY
+```
+
+*Result*
+```
+lot_number lengths : {8: 2781}
+vin lengths        : {17: 2781}
+score digit counts : {1: 97, 2: 2473}
+
+lot numbers that are not exactly 8 digits: none
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Confirmed — **lot is always 8 digits, VIN always 17 chars** (2,781/2,781). That makes length-based parsing unambiguous. Rewriting:
+
+<details>
+<summary>**Tool — Bash**: Switch to bare two-digit score with width-based parsing</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+
+s=s.replace('''_SCORE_SEG = re.compile(r"^score(\\d{1,2})$")
+
+
+def score_tag(score):
+    """38 -> 'score38'. Prefixed on purpose.
+
+    A bare number would be ambiguous against the year and lot segments, which
+    are also digits — and this parser identifies segments by shape, not
+    position. The prefix also makes the folder self-describing: `score38` needs
+    no legend, `38` does.
+    """
+    try:
+        n = int(float(str(score).strip()))
+    except (TypeError, ValueError):
+        return ""
+    return f"score{n}" if 0 <= n <= 50 else ""''',
+'''# Lot numbers and VINs are FIXED WIDTH in this data — 8 digits and 17 characters,
+# on 2,781 of 2,781 rows with no exceptions. That is what makes a bare two-digit
+# score unambiguous: nothing else in the name is 1-2 characters long.
+LOT_LEN = 8
+VIN_LEN = 17
+_SCORE_SEG = re.compile(r"^\\d{1,2}$")
+
+
+def score_tag(score):
+    """38 -> '38', 8 -> '08'. Empty when the lot has not been scored.
+
+    Zero-padded for the same reason distance is: `8` would sort after `50` in a
+    plain listing. Absent rather than a placeholder when unscored, because IAA
+    assigns the score AFTER check-in photos are processed — an `Auction Not
+    Assigned` lot routinely arrives without one and gains it days later, at
+    which point the folder is renamed to add the segment.
+    """
+    try:
+        n = int(float(str(score).strip()))
+    except (TypeError, ValueError):
+        return ""
+    return f"{n:02d}" if 0 <= n <= 50 else ""''',1)
+
+s=s.replace('''    parts = [p for p in str(name).split("-") if p]
+    year = next((p for p in parts if _YEAR_SEG.match(p)), "")
+    dist = next((p for p in parts if _DIST_SEG.match(p)), "")
+    bn = next((p for p in parts if p.startswith("$")), "")
+    # score BEFORE vin: `score38` contains letters and would otherwise be
+    # mistaken for the VIN, which is "the token with letters in it".
+    score = next((p for p in parts if _SCORE_SEG.match(p)), "")
+    used = {year, dist, bn, score}
+    rest = [p for p in parts if p not in used]
+    lot = next((p for p in rest if p.isdigit()), "")
+    vin = next((p for p in rest if not p.isdigit() and not p.startswith("$")), "")
+    return lot, vin, year, dist, bn, score''',
+'''    parts = [p for p in str(name).split("-") if p]
+
+    # Identify by WIDTH first — lot and VIN are fixed-width, so they can be
+    # lifted out unambiguously and everything else read from what remains.
+    lot = next((p for p in parts if p.isdigit() and len(p) == LOT_LEN), "")
+    vin = next((p for p in parts if len(p) == VIN_LEN and not p.isdigit()), "")
+    dist = next((p for p in parts if _DIST_SEG.match(p)), "")
+    bn = next((p for p in parts if p.startswith("$")), "")
+    year = next((p for p in parts if p != lot and _YEAR_SEG.match(p)), "")
+    # Whatever short numeric token is left is the score: nothing else in the
+    # name is 1-2 characters (year is 4, lot is 8, VIN is 17).
+    used = {lot, vin, dist, bn, year}
+    score = next((p for p in parts if p not in used and _SCORE_SEG.match(p)), "")
+    return lot, vin, year, dist, bn, score''',1)
+
+s=s.replace('''[-{{year}}][-{{dist}}][-score{{N}}][-${{buynow}}]/")''',
+            '''[-{{year}}][-{{dist}}][-{{score}}][-${{buynow}}]/")''',1)
+p.write_text(s, encoding="utf-8"); print("patched")
+PY
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+python - <<'PY'
+import sys; sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+print("=== score_tag (two-digit, padded) ===")
+for v in [38,8,0,50,None,"","abc",51]:
+    print(f"   {str(v):<6} -> {P.score_tag(v)!r}")
+print("\n=== naming ===")
+for a in [("45704693","WAUENCF5XJA060484","2019","2500mi","7200","x",38),
+          ("45704693","WAUENCF5XJA060484","2019","250mi","","x",8),
+          ("45704693","WAUENCF5XJAxxxxxx","2018","750mi","","x",None),
+          ("45704693","WAUENCF5XJA060484","2019","2500mi","7200","x",50)]:
+    print("  ", P.folder_name(*a))
+print("\n=== parse: every generation, incl. bare-score and no-score ===")
+for n in ["2019-2500mi-45704693-WAUENCF5XJA060484-38-$7200",
+          "2019-0250mi-45704693-WAUENCF5XJAxxxxxx-08",
+          "2019-0250mi-45704693-WAUENCF5XJAxxxxxx",
+          "2019-2500mi-45704693-WAUENCF5XJA060484-score38-$7200",
+          "45704693-WAUENCF5XJA060484-2019-2500mi",
+          "45704693-WAUENCF5XJA060484"]:
+    lot,vin,y,d,b,sc=P.parse_folder_name(n)
+    ok = lot=="45704693" and vin.startswith("WAUENCF5XJA")
+    print(f"  {'OK ' if ok else '!! '}{n:<54} y={y!r:<7} d={d!r:<9} sc={sc!r:<5} bn={b!r}")
+PY
+```
+
+*Result*
+```
+patched
+compile OK
+=== score_tag (two-digit, padded) ===
+   38     -> '38'
+   8      -> '08'
+   0      -> '00'
+   50     -> '50'
+   None   -> ''
+          -> ''
+   abc    -> ''
+   51     -> ''
+
+=== naming ===
+   2019-2500mi-45704693-WAUENCF5XJA060484-38-$7200
+   2019-0250mi-45704693-WAUENCF5XJA060484-08
+   2018-0750mi-45704693-WAUENCF5XJAxxxxxx
+   2019-2500mi-45704693-WAUENCF5XJA060484-50-$7200
+
+=== parse: every generation, incl. bare-score and no-score ===
+  OK 2019-2500mi-45704693-WAUENCF5XJA060484-38-$7200        y='2019'  d='2500mi'  sc='38'  bn='$7200'
+  OK 2019-0250mi-45704693-WAUENCF5XJAxxxxxx-08              y='2019'  d='0250mi'  sc='08'  bn=''
+  OK 2019-0250mi-45704693-WAUENCF5XJAxxxxxx                 y='2019'  d='0250mi'  sc=''    bn=''
+  OK 2019-2500mi-45704693-WAUENCF5XJA060484-score38-$7200   y='2019'  d='2500mi'  sc=''    bn='$7200'
+  OK 45704693-WAUENCF5XJA060484-2019-2500mi                 y='2019'  d='2500mi'  sc=''    bn=''
+  OK 45704693-WAUENCF5XJA060484                             y=''      d=''        sc=''    bn=''
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Let me verify the scenario you flagged — an unscored lot gaining a score later:
+
+<details>
+<summary>**Tool — Bash**: Test score appearing, changing, and migrating</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys, shutil, tempfile, pathlib
+sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+tmp=pathlib.Path(tempfile.mkdtemp()); P.IMAGES_ROOT=tmp
+def mk(rel):
+    d=tmp/rel; d.mkdir(parents=True); (d/"a_001.jpg").write_text("i"); return d
+
+print("=== Auction Not Assigned lot, unscored, later gains a score ===")
+mk("open/Audi A5/OTHER/iaai/2019-2500mi-45111111-WAUAAAAAAAAxxxxxx")
+g,src=P.resolve_folder("iaai","45111111","WAUAAAAAAAAxxxxxx","OTHER","Audi A5",
+                       "2019","2500mi","", score=38)
+print(f"   -> {g.name}")
+print(f"      from {src.split('/')[-1]}   image kept: {(g/'a_001.jpg').exists()}")
+
+print("\n=== score changes (IAA re-assesses) ===")
+g2,src2=P.resolve_folder("iaai","45111111","WAUAAAAAAAAxxxxxx","OTHER","Audi A5",
+                         "2019","2500mi","", score=41)
+print(f"   -> {g2.name}   from {src2.split('/')[-1]}")
+
+print("\n=== migrating a gen-5 'score38' folder to the bare form ===")
+mk("open/Audi A5/FRONT/iaai/2018-1250mi-45222222-WAUBBBBBBBBxxxxxx-score32")
+g3,src3=P.resolve_folder("iaai","45222222","WAUBBBBBBBBxxxxxx","FRONT","Audi A5",
+                         "2018","1250mi","", score=32)
+print(f"   -> {g3.name}   from {src3.split('/')[-1]}   image kept: {(g3/'a_001.jpg').exists()}")
+
+print("\n=== VIN resolves AND score appears at once ===")
+mk("open/Audi A5/FRONT/iaai/2020-1000mi-45333333-WAUCCCCCCCCxxxxxx")
+g4,src4=P.resolve_folder("iaai","45333333","WAUCCCCCCCC987654","FRONT","Audi A5",
+                         "2020","1000mi","7600", score=8)
+print(f"   -> {g4.name}")
+print(f"      image kept: {(g4/'a_001.jpg').exists()}")
+shutil.rmtree(tmp)
+PY
+```
+
+*Result*
+```
+=== Auction Not Assigned lot, unscored, later gains a score ===
+   -> 2019-2500mi-45111111-WAUAAAAAAAAxxxxxx-38
+      from 2019-2500mi-45111111-WAUAAAAAAAAxxxxxx   image kept: True
+
+=== score changes (IAA re-assesses) ===
+   -> 2019-2500mi-45111111-WAUAAAAAAAAxxxxxx-41   from 2019-2500mi-45111111-WAUAAAAAAAAxxxxxx-38
+
+=== migrating a gen-5 'score38' folder to the bare form ===
+   -> 2018-1250mi-45222222-WAUBBBBBBBBxxxxxx-32   from 2018-1250mi-45222222-WAUBBBBBBBBxxxxxx-score32   image kept: True
+
+=== VIN resolves AND score appears at once ===
+   -> 2020-1000mi-45333333-WAUCCCCCCCC987654-08-$7600
+      image kept: True
+```
+
+</details>
+
+All four scenarios work. Migrating the real tree:
+
+<details>
+<summary>**Tool — Bash**: Migrate all folders to the bare two-digit score</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys, csv, glob, re, pathlib, collections
+sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+best={}
+for p in sorted(glob.glob("analytics/data/*/csv-raw/iaai/*.csv"),
+                key=lambda x: pathlib.Path(x).stat().st_mtime):
+    for r in csv.DictReader(open(p)): best[r["lot_number"]]=r
+
+dirs=sorted(glob.glob("images/*/*/*/iaai/*/"))
+print(f"{len(dirs)} lot folders across all buckets\n")
+moved=same=unknown=noscore=0
+per_model=collections.Counter()
+for d in dirs:
+    d=pathlib.Path(d); bucket=d.parents[3].name; model=d.parents[2].name
+    lot,vin,*_ = P.parse_folder_name(d.name)
+    r=best.get(lot)
+    if not r: unknown+=1; print(f"   unknown lot: {d.name}"); continue
+    if not r.get("iaa_vehicle_score"): noscore+=1
+    kw=re.sub(r"^\s*(19|20)\d{2}\s+","",r.get("search_keyword") or "").strip()
+    dest,src = P.resolve_folder("iaai", lot, r.get("vin") or vin, P.group_of(r),
+                                kw or model, r.get("year"), r.get("distance_bucket"),
+                                r.get("buy_now_usd"), bucket=bucket,
+                                score=r.get("iaa_vehicle_score"))
+    if src: moved+=1; per_model[model]+=1
+    else: same+=1
+print(f"  renamed {moved}, already correct {same}, unknown {unknown}")
+print(f"  lots with no score (segment omitted): {noscore}")
+print(f"  by model: {dict(per_model)}")
+PY
+```
+
+*Result*
+```
+314 lot folders across all buckets
+
+  renamed 314, already correct 0, unknown 0
+  lots with no score (segment omitted): 0
+  by model: {'Audi A4': 136, 'Audi A5': 96, 'Audi RS 5': 12, 'Audi S4': 24, 'Audi S5': 46}
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Verify all five image sets</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys, glob, os, collections; sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+dirs=sorted(glob.glob("images/*/*/*/iaai/*/"))
+lots=collections.Counter(P.parse_folder_name(os.path.basename(d.rstrip('/')))[0] for d in dirs)
+fs=glob.glob("images/**/*.jpg", recursive=True)
+bad=[d for d in dirs if "score" in os.path.basename(d.rstrip('/'))]
+sc=sum(1 for d in dirs if P.parse_folder_name(os.path.basename(d.rstrip('/')))[5])
+print(f"  {len(dirs)} folders / {len(lots)} distinct lots / duplicates: "
+      f"{ss if (ss:={k:v for k,v in lots.items() if v>1}) else 'none'}")
+print(f"  {len(fs)} images, {sum(os.path.getsize(f) for f in fs)/1e9:.2f} GB")
+print(f"  with score segment: {sc}/{len(dirs)}   leftover 'score' prefix: {len(bad)}")
+# every folder must round-trip
+badp=[d for d in dirs if len(P.parse_folder_name(os.path.basename(d.rstrip('/')))[0])!=8
+      or len(P.parse_folder_name(os.path.basename(d.rstrip('/')))[1])!=17]
+print(f"  folders failing lot/vin round-trip: {len(badp)}")
+PY
+echo
+for m in "Audi A4" "Audi A5" "Audi RS 5" "Audi S4" "Audi S5"; do
+  echo "=== $m ==="
+  find "images/open/$m" -mindepth 3 -maxdepth 3 -type d | head -2 | sed "s#images/open/$m/#   #"
+done
+```
+
+*Result*
+```
+  314 folders / 314 distinct lots / duplicates: none
+  5207 images, 1.73 GB
+  with score segment: 314/314   leftover 'score' prefix: 0
+  folders failing lot/vin round-trip: 0
+
+=== Audi A4 ===
+   FRONT/iaai/2018-3000mi-45534886-WAULMAF40JAxxxxxx-15
+   FRONT/iaai/2020-2000mi-45688458-WAUDNAF49LNxxxxxx-37
+=== Audi A5 ===
+   FRONT/iaai/2019-1250mi-45866615-WAUENDF56KAxxxxxx-12
+   FRONT/iaai/2021-2750mi-45664957-WAUFACF58MAxxxxxx-33
+=== Audi RS 5 ===
+   FRONT/iaai/2018-2250mi-45656059-WUABWGFF6J1xxxxxx-45
+   FRONT/iaai/2019-1250mi-45644589-WUABWCF56KAxxxxxx-05
+=== Audi S4 ===
+   FRONT/iaai/2019-0250mi-45853920-WAUB4AF49KAxxxxxx-26
+   FRONT/iaai/2019-0750mi-45814586-WAUB4AF47KAxxxxxx-21
+=== Audi S5 ===
+   FRONT/iaai/2021-2750mi-45763577-WAUB4DF54MAxxxxxx-43
+   FRONT/iaai/2018-3000mi-45497016-WAUC4CF51JAxxxxxx-14
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Update the doc and rebuild the transcript</summary>
+
+````bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import pathlib
+p=pathlib.Path("analytics/schema/iaai_csv_schema.md"); s=p.read_text(encoding="utf-8")
+s=s.replace("""images/open/Audi A5/FRONT/iaai/2018-1250mi-45662018-WAUENCF51JA104260-score10
+images/open/Audi A5/FRONT/iaai/2018-2250mi-45490663-WAUENCF55JA084384-score32
+images/open/Audi S4/OTHER/iaai/2018-1000mi-45719990-WAUB4AF44JAxxxxxx-score0""",
+"""images/open/Audi A5/FRONT/iaai/2019-1250mi-45866615-WAUENDF56KAxxxxxx-12
+images/open/Audi A5/FRONT/iaai/2018-3000mi-45704693-WAUENCF5XJA060484-32-$7600
+images/open/Audi RS 5/FRONT/iaai/2019-1250mi-45644589-WUABWCF56KAxxxxxx-05""")
+s=s.replace("""{year}-{dist}-{lot}-{vin}            gen 4
+{year}-{dist}-{lot}-{vin}-score{N}   gen 5 (current)""",
+"""{year}-{dist}-{lot}-{vin}            gen 4
+{year}-{dist}-{lot}-{vin}-score{N}   gen 5
+{year}-{dist}-{lot}-{vin}-{NN}       gen 6 (current)""")
+s=s.replace("""[{year}-][{dist}-]{lot}-{vin}[-score{N}][-${buynow}]/{lot}_001.jpg""",
+            """[{year}-][{dist}-]{lot}-{vin}[-{score}][-${buynow}]/{lot}_001.jpg""")
+s=s.replace("""distance is digits + `mi`, a score is `score` + digits, a Buy Now starts with
+`$`, the lot is the remaining all-digit token, the VIN is the token containing
+letters. The score is matched **before** the VIN — `score38` contains letters and
+would otherwise be taken for the VIN. It is prefixed rather than bare for the
+same reason a bare `38` would be ambiguous against the year and lot segments.""",
+"""**lot and VIN are identified by WIDTH**, which is what makes everything else
+unambiguous. Both are fixed in this data — 8 digits and 17 characters on
+**2,781 of 2,781 rows, no exceptions** — so they can be lifted out first and the
+remaining tokens read from what is left:
+
+```
+lot     exactly 8 digits
+vin     exactly 17 characters
+year    4 digits, 19xx/20xx
+dist    digits + "mi"
+buy-now starts with "$"
+score   whatever 1-2 digit token remains — nothing else is that short
+```
+
+The score is therefore written **bare and zero-padded** (`38`, `08`, `50`) rather
+than prefixed. Padding matters for the same reason it does on distance: `8` would
+sort after `50`.
+
+**An unscored lot gains its segment later.** IAA assigns the score after
+processing check-in photos, so an `Auction Not Assigned` lot routinely arrives
+without one and gains it days later — the folder is renamed to add the segment
+then, and renamed again if IAA re-assesses. Verified for all four transitions:
+score appearing, score changing, VIN resolving simultaneously, and migration from
+the earlier `score38` form.""")
+p.write_text(s, encoding="utf-8"); print("doc updated")
+PY
+python analytics/scripts/build_chat_transcript.py 2>&1 | tail -1
+````
+
 </details>

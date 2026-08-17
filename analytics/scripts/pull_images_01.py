@@ -124,6 +124,28 @@ def money_tag(v):
 
 _YEAR_SEG = re.compile(r"^(?:19|20)\d{2}$")
 _DIST_SEG = re.compile(r"^(\d+)mi$")
+# Lot numbers and VINs are FIXED WIDTH in this data — 8 digits and 17 characters,
+# on 2,781 of 2,781 rows with no exceptions. That is what makes a bare two-digit
+# score unambiguous: nothing else in the name is 1-2 characters long.
+LOT_LEN = 8
+VIN_LEN = 17
+_SCORE_SEG = re.compile(r"^\d{1,2}$")
+
+
+def score_tag(score):
+    """38 -> '38', 8 -> '08'. Empty when the lot has not been scored.
+
+    Zero-padded for the same reason distance is: `8` would sort after `50` in a
+    plain listing. Absent rather than a placeholder when unscored, because IAA
+    assigns the score AFTER check-in photos are processed — an `Auction Not
+    Assigned` lot routinely arrives without one and gains it days later, at
+    which point the folder is renamed to add the segment.
+    """
+    try:
+        n = int(float(str(score).strip()))
+    except (TypeError, ValueError):
+        return ""
+    return f"{n:02d}" if 0 <= n <= 50 else ""
 
 
 def dist_tag(bucket):
@@ -137,7 +159,7 @@ def dist_tag(bucket):
     return f"{int(m.group(1)):04d}mi" if m else str(bucket or "").strip()
 
 
-def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x"):
+def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None):
     """[{year}-][{distance}-]{lot}-{vin}[-${buynow}]
 
     Year and distance lead so a listing sorts by age then proximity — the two
@@ -159,6 +181,9 @@ def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x"):
     if d:
         parts.append(d)
     parts += [str(lot), vin]
+    sc = score_tag(score)
+    if sc:
+        parts.append(sc)
     bn = money_tag(buy_now)
     if bn:
         parts.append(bn)
@@ -183,20 +208,28 @@ def parse_folder_name(name):
     VIN-resolution rename.
     """
     parts = [p for p in str(name).split("-") if p]
-    year = next((p for p in parts if _YEAR_SEG.match(p)), "")
+
+    # Identify by WIDTH first — lot and VIN are fixed-width, so they can be
+    # lifted out unambiguously and everything else read from what remains.
+    lot = next((p for p in parts if p.isdigit() and len(p) == LOT_LEN), "")
+    vin = next((p for p in parts if len(p) == VIN_LEN and not p.isdigit()), "")
     dist = next((p for p in parts if _DIST_SEG.match(p)), "")
     bn = next((p for p in parts if p.startswith("$")), "")
-    used = {year, dist, bn}
-    rest = [p for p in parts if p not in used]
-    lot = next((p for p in rest if p.isdigit()), "")
-    vin = next((p for p in rest if not p.isdigit() and not p.startswith("$")), "")
-    return lot, vin, year, dist, bn
+    year = next((p for p in parts if p != lot and _YEAR_SEG.match(p)), "")
+    # Whatever short numeric token is left is the score: nothing else in the
+    # name is 1-2 characters (year is 4, lot is 8, VIN is 17).
+    used = {lot, vin, dist, bn, year}
+    score = next((p for p in parts if p not in used and _SCORE_SEG.match(p)), "")
+    return lot, vin, year, dist, bn, score
+
+
+BUCKETS = ("open", "sold")
 
 
 def lot_dir(platform, lot, vin, group, model, year="", dist_bucket="",
-            buy_now="", mask_char="x"):
-    return (IMAGES_ROOT / "open" / model / group / platform
-            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char))
+            buy_now="", mask_char="x", bucket="open", score=None):
+    return (IMAGES_ROOT / bucket / model / group / platform
+            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char, score))
 
 
 def existing_dirs(platform, lot, model=None):
@@ -207,14 +240,17 @@ def existing_dirs(platform, lot, model=None):
     different search. The pre-model and pre-group layouts are searched too, so
     older trees migrate on first re-pull instead of being stranded.
     """
-    root = IMAGES_ROOT / "open"
-    if not root.exists():
-        return
     seen = set()
-    # every {model}/{group}/{platform}, plus the two legacy shapes
-    candidates = list(root.glob(f"*/*/{platform}"))          # model/group/platform
-    candidates += [root / g / platform for g in DAMAGE_DIRS]  # pre-model
-    candidates.append(root / platform)                        # pre-group
+    candidates = []
+    # BOTH buckets: a sold lot that relists has to be found under sold/ and
+    # moved back to open/, not duplicated there.
+    for b in BUCKETS:
+        root = IMAGES_ROOT / b
+        if not root.is_dir():
+            continue
+        candidates += list(root.glob(f"*/*/{platform}"))          # model/group/platform
+        candidates += [root / g / platform for g in DAMAGE_DIRS]  # pre-model
+        candidates.append(root / platform)                        # pre-group
     for c in candidates:
         if not c.is_dir() or c in seen:
             continue
@@ -227,7 +263,8 @@ def existing_dirs(platform, lot, model=None):
 
 
 def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
-                   buy_now="", mask_char="x", apply=True):
+                   buy_now="", mask_char="x", apply=True, bucket="open",
+                   score=None):
     """`apply=False` reports what WOULD happen and touches nothing.
 
     Renaming is a side effect of resolution, which made --dry-run mutate the
@@ -235,11 +272,12 @@ def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
     being destructive.
     """
     return _resolve_folder(platform, lot, vin, group, model, year, dist_bucket,
-                           buy_now, mask_char, apply)
+                           buy_now, mask_char, apply, bucket, score)
 
 
 def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
-                    buy_now="", mask_char="x", apply=True):
+                    buy_now="", mask_char="x", apply=True, bucket="open",
+                    score=None):
     """-> (path, moved_from). Keeps ONE folder per lot as knowledge improves.
 
     A lot is identified by its lot number alone — stable across relists — so any
@@ -254,13 +292,13 @@ def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
                          normalise so one tree does not mix `******` and `xxxxxx`
     """
     want = lot_dir(platform, lot, vin, group, model, year, dist_bucket, buy_now,
-                   mask_char)
+                   mask_char, bucket, score)
 
     for old in existing_dirs(platform, lot):
         if old == want:
             return want, ""
-        _, old_vin, _, _, _ = parse_folder_name(old.name)
-        _, new_vin, _, _, _ = parse_folder_name(want.name)
+        _, old_vin, *_ = parse_folder_name(old.name)
+        _, new_vin, *_ = parse_folder_name(want.name)
         old_masked, new_masked = is_masked_vin(old_vin), is_masked_vin(new_vin)
 
         # Name and placement are decided independently: keep the better VIN, but
@@ -268,7 +306,7 @@ def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
         # facts about today, and a stale Buy Now in a folder name is a lie.
         if not old_masked and new_masked:
             target = want.parent / folder_name(lot, old_vin, year, dist_bucket,
-                                               buy_now, mask_char)
+                                               buy_now, mask_char, score)
         else:
             target = want
 
@@ -292,6 +330,63 @@ def image_urls(row, size):
         return []
     w, h = SIZES[size]
     return [(k, f"{prefix}{k}&width={w}&height={h}") for k in keys]
+
+
+
+# --------------------------------------------------------------------------
+# archiving lots that have left the listings
+# --------------------------------------------------------------------------
+def archive_sold(platform="iaai", apply=True):
+    """Move folders for departed lots from images/open/ to images/sold/.
+
+    Photos of a lot that sold are the most valuable thing in the tree — they are
+    the comp. Deleting them would be worse than useless, and leaving them in
+    `open/` makes the open tree a lie about what is actually biddable. So they
+    are archived, keeping the identical {model}/{group}/{platform}/{name} shape
+    so an open folder and its sold counterpart are directly comparable.
+
+    "Departed" is `exit_state == 'gone'` from lot_history_01, which is itself
+    scope-aware — a lot is only called gone when a later, non-truncated snapshot
+    that actually covered its market and keyword failed to contain it. That
+    matters here because the move is destructive-ish: a false positive would
+    bury a live lot in the sold archive.
+
+    A relist reverses it. `existing_dirs()` searches both buckets, so a lot that
+    comes back is found under sold/ and moved to open/ by the next image run
+    rather than being downloaded a second time.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lot_history_01 as HIST
+    import apibara_json2csv_iaai_01 as F
+
+    paths = HIST.all_archives()
+    if not paths:
+        return [], []
+    history = HIST.build_history(F.load_records(paths), paths)
+
+    moved, skipped = [], []
+    root = IMAGES_ROOT / "open"
+    if not root.is_dir():
+        return moved, skipped
+    for folder in sorted(root.glob(f"*/*/{platform}/*")):
+        if not folder.is_dir():
+            continue
+        lot = parse_folder_name(folder.name)[0]
+        h = history.get(lot)
+        if not h or h.get("exit_state") != "gone":
+            continue
+        # folder is  images/open/{model}/{group}/{platform}/{name}
+        model, group = folder.parents[2].name, folder.parents[1].name
+        dest = IMAGES_ROOT / "sold" / model / group / platform / folder.name
+        if dest.exists():
+            skipped.append((folder, dest, "destination exists"))
+            continue
+        if apply:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            folder.rename(dest)
+        moved.append((folder, dest, h.get("exit_reason") or "unknown",
+                      h.get("exit_price_usd") or ""))
+    return moved, skipped
 
 
 # --------------------------------------------------------------------------
@@ -357,6 +452,10 @@ def build_arg_parser():
                          'to the dominant make+model in the CSV, so it matches '
                          'the pull_iaai_web search that produced it')
     ap.add_argument("--platform", default="iaai")
+    ap.add_argument("--archive-sold", action="store_true",
+                    help="before downloading, move folders for lots that have "
+                         "left the listings from images/open/ to images/sold/, "
+                         "keeping the same {model}/{group}/{platform} shape")
     ap.add_argument("--dry-run", action="store_true",
                     help="list what would be fetched, download nothing")
     return ap
@@ -435,6 +534,16 @@ def main(argv=None):
 
     rows = list(csv.DictReader(open(path, encoding="utf-8")))
     model_folder = args.model_folder or derive_model_folder(rows)
+
+    if args.archive_sold:
+        moved, skipped = archive_sold(args.platform, apply=not args.dry_run)
+        verb = "would move" if args.dry_run else "moved"
+        print(f"\n  archive: {verb} {len(moved)} departed lot(s) -> images/sold/")
+        for src, dest, reason, price in moved[:20]:
+            tag = f"{reason}" + (f" ${price}" if price else "")
+            print(f"      {src.parents[2].name}/{src.parents[1].name}/{src.name}  [{tag}]")
+        for src, dest, why in skipped:
+            print(f"      !! skipped {src.name}: {why}")
     kept, dropped = [], {}
     for r in rows:
         ok, why = matches(r, args, where)
@@ -456,7 +565,7 @@ def main(argv=None):
     print(f"  model:  {model_folder}"
           + ("" if args.model_folder else "   (derived from the CSV)"))
     print(f"  target: images/open/{model_folder}/{{{'|'.join(DAMAGE_DIRS)}}}/"
-          f"{args.platform}/{{lot}}-{{vin}}[-{{year}}][-{{dist}}][-${{buynow}}]/")
+          f"{args.platform}/{{lot}}-{{vin}}[-{{year}}][-{{dist}}][-{{score}}][-${{buynow}}]/")
     if not kept:
         raise SystemExit("\nnothing matched the filters")
 
@@ -472,7 +581,8 @@ def main(argv=None):
             folder, renamed = resolve_folder(
                 args.platform, r["lot_number"], r["vin"], group_of(r),
                 model_folder, r.get("year"), r.get("distance_bucket"),
-                r.get("buy_now_usd"), args.mask_char, apply=False)
+                r.get("buy_now_usd"), args.mask_char, apply=False,
+                score=r.get("iaa_vehicle_score"))
             urls = image_urls(r, args.size)
             note = f"   [would move from {renamed}]" if renamed else ""
             print(f"    {r['lot_number']:<10} {r['year']} {r['model']:<10} "
@@ -487,7 +597,8 @@ def main(argv=None):
             folder, renamed = resolve_folder(
                 args.platform, r["lot_number"], r["vin"], group_of(r),
                 model_folder, r.get("year"), r.get("distance_bucket"),
-                r.get("buy_now_usd"), args.mask_char)
+                r.get("buy_now_usd"), args.mask_char,
+                score=r.get("iaa_vehicle_score"))
             folder.mkdir(parents=True, exist_ok=True)
             urls = image_urls(r, args.size)
             if args.max_images:
