@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(python3 analytics/scripts/pull_apibara_01.py iaai sold --make Audi --model S5 --year-range 2018-2023 --auction-date-range 2026-04-20 2026-05-11 --seller insurance --body-style -coupe --engine-type V6 --dry-run)",
+      "Bash(echo \"RC=$?\")",
+      "Bash(python3 analytics/scripts/pull_apibara_01.py iaai live --make Audi --auction-date-range 2026-09-01 --dry-run)",
+      "Bash(python3 analytics/scripts/pull_apibara_01.py copart sold --body-style coupe --dry-run)",
+      "Bash(python3 /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/replay.py)",
+      "WebFetch(domain:apibara.tech)",
+      "Bash(timeout 180 python3 test/test_apibara_filters_01.py)",
+      "Bash(timeout 180 python3 test/test_apibara_filters_01.py type_automobile seller_finance)",
+      "Bash(python analytics/scripts/apibara_json2csv_iaai_01.py analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_2018_audi_a5_20260813T144843.json)",
+      "Bash(python analytics/scripts/data_pull_01.py iaai analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_2018_audi_a5_20260813T144843.json --tier 2)"
+    ]
+  }
+}

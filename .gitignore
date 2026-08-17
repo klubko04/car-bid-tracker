@@ -10,8 +10,31 @@ tracker.db
 # Test/scratch artifacts — live API responses written by test/*.py
 test_run/
 
-# Downloaded auction photos + generated archive tree (app/image_pipeline.py)
-images/
+# Scratch notes / pasted terminal output
+tmp/
+
+# --------------------------------------------------------------------------
+# Data and photos: keep the FOLDER TREE, never the contents.
+#
+# Every pull is reproducible (re-run the puller) or irreplaceable-but-private
+# (json-raw archives are megabytes of scraped listings — 131 MB and growing,
+# and not ours to redistribute). The empty tree is committed so a fresh clone
+# can run the pipeline without first guessing the layout, which is otherwise
+# only described in analytics/schema/iaai_csv_schema.md.
+#
+# The `!.../` line matters: without re-including directories, git stops
+# descending and never sees the .gitkeep files below them.
+# --------------------------------------------------------------------------
+analytics/data/**
+!analytics/data/**/
+!analytics/data/**/.gitkeep
+
+images/**
+!images/**/
+!images/**/.gitkeep
+
+# Claude Code — share project settings, keep machine-local permissions out
+.claude/settings.local.json
 
 # Python
 __pycache__/
