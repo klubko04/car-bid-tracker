@@ -1,25 +1,45 @@
-# IAAI CSV schema — raw JSON → analysis CSV
+# Auction analytics schema — raw JSON → adapted JSON → analysis CSV
 
-Two sources feed one schema. Apibara is the API; iaai.com is the public site.
+The IAAI branch has two sources feeding one schema: APIBara and iaai.com. The
+Copart branch shares the storage/provenance contract, but needs its own adapter
+and flattener because its payload is materially thinner.
 
 ```
-pull_apibara_01.py           ->  json-raw/apibara_*.json      ]
-        |                          stage 1 — spends API quota  ]
-        |                                                      ]-> same record shape
+pull_apibara_01.py           ->  json-raw/apibara_*.json
+        |                          stage 1 — spends API quota
+        | iaai
+        +--------------------->  apibara_json2csv_iaai_01.py
+        |
+        | copart
+copart_vpic_adapt_01.py      ->  json-adapted/vpic_*.json
+                                   stage 1.5 — fill missing specs; free vPIC
+        |
+apibara_json2csv_copart_01.py -> csv-raw/*_copart.csv
+                                   stage 2 — Copart flatten + distance, 89 fields
+
+pull_copart_web_01.py        ->  json-raw/copart/copartweb_*.json
+                                   stage 1 — open lots; no key or quota
+copart_web_adapt_01.py       ->  json-adapted/copart/...       [next stage]
+                                   stage 1.5 — reshape + US-only boundary
+        |
+copart_vpic_adapt_01.py      ->  json-adapted/copart/vpic_*.json
+
 pull_iaai_web_01.py          ->  json-raw/iaaiweb_*.json      ]
         |                          stage 1 — no quota, no key  ]
 iaai_web_adapt_01.py         ->  json-adapted/adapted_*.json  ]
         |                          stage 1.5 — reshape + enrich
 apibara_json2csv_iaai_01.py  ->  csv-raw/*_iaai.csv
-        |                          stage 2 — flatten + distance, 57 fields, unfiltered
+        |                          stage 2 — flatten + distance, 69 fields, unfiltered
 data_pull_01.py {iaai|copart} ->  csv-cut/*_data.csv
                                    stage 3 — filter + tier + sold period
 ```
 
-There is **one** flattener and **one** column set. The web source does not get
-its own converter; it gets an adapter that reshapes it into the Apibara record
-shape. See [The web source](#the-web-source-iaaicom) for why, and for the four
-columns it cannot fill.
+There is **one IAAI flattener and one IAAI column set**. The IAAI web source
+does not get its own converter; it gets an adapter that reshapes it into the
+APIBara record shape. Copart has its own 89-column flattener because its raw
+payload and enrichment provenance are different. See
+[The web source](#the-web-source-iaaicom) for the IAAI rationale and
+[Copart differences](#copart-differences-and-vpic-enrichment) for the split.
 
 ## Where files live
 
@@ -39,18 +59,25 @@ analytics/data/
 
 Three axes, in the order a file is filed: **bucket** (sold / open) → **layer**
 (json-raw / json-adapted / csv-raw / csv-cut) → **platform** (iaai / copart).
-The `copart/` folders exist and are empty — placeholders carrying a `.gitkeep`,
-since no Copart converter is written yet.
+The Copart `json-adapted/` folders currently hold vPIC-enriched APIBara copies;
+Copart web archives need `copart_web_adapt_01.py` before they can enter that
+shared downstream shape. `copart_vpic_adapt_01.py --all` intentionally selects
+only `apibara_*.json`, and an explicitly supplied `source: copart-web` archive
+fails with an actionable error instead of silently producing zero rows.
+`csv-raw/copart/` holds the unfiltered 89-column extract, and
+`csv-cut/copart/` holds stage-3 filtered/tiered views.
 
 | layer | written by | contents | replaceable? |
 |---|---|---|---|
 | `json-raw/` | stage 1 | untouched API/site responses | **No** — lots age out of Apibara's rolling ~6-month window, so these are the only lasting copy |
-| `json-adapted/` | stage 1.5 | web records reshaped to the Apibara shape | Yes — regenerate free from json-raw |
+| `json-adapted/` | stage 1.5 | IAAI web records reshaped to APIBara; Copart records fill-enriched with vPIC | Yes — regenerate from json-raw (vPIC is free and cached) |
 | `csv-raw/` | stage 2 | every lot in the archive, flattened | Yes — regenerate free |
 | `csv-cut/` | stage 3 | filtered + tier/sold_period | Yes — regenerate free |
 
 `json-adapted/` is deliberately **not** inside `json-raw/`: it is derived, and
-the raw layer's whole value is being the one thing you cannot recompute.
+the raw layer's whole value is being the one thing you cannot recompute. Copart
+raw archives retain every market returned by APIBara; the Copart adapter makes
+the project boundary explicit by retaining only positively identified US lots.
 
 Only `json-raw/` is irreplaceable, which is the whole reason the layers are
 split: back that up and everything else rebuilds without touching the API.
@@ -71,7 +98,7 @@ Bare filenames resolve against both `json-raw/` folders first, then both
 `json-adapted/` folders, then the pre-reorganisation trees, so older paths and
 commands still work.
 
-Two stage-1 pullers, one downstream:
+Pipeline entry points:
 
 ```bash
 # API source — spends quota (100/month)
@@ -82,9 +109,24 @@ python analytics/scripts/pull_apibara_01.py iaai open --make Audi --model A5 \
 python analytics/scripts/pull_iaai_web_01.py --keyword 2018 Audi A5 --details
 python analytics/scripts/iaai_web_adapt_01.py --enrich-from apibara_*.json --audit
 
-# Both converge here
+# Copart API source -> free NHTSA VIN/spec enrichment; works for ended/open/live
+python analytics/scripts/pull_apibara_01.py copart ended --make Audi --model S5 \
+    --year-range 2018-2023 --auction-date-range 2026-02-17 2026-08-17 \
+    --max-pages 20
+python analytics/scripts/copart_vpic_adapt_01.py apibara_copart_ended_audi_s5*.json
+
+# Copart site source — exact open S5 discovery; no key or quota
+python analytics/scripts/pull_copart_web_01.py
+python analytics/scripts/pull_copart_web_01.py --details --max-details 5
+# Next required stage (not implemented yet): copart_web_adapt_01.py
+
+# The two IAAI sources converge here.
 python analytics/scripts/apibara_json2csv_iaai_01.py <archive>.json
 python analytics/scripts/data_pull_01.py iaai <archive>.json --tier 2
+
+# Copart stage 2 + stage 3
+python analytics/scripts/apibara_json2csv_copart_01.py vpic_apibara_copart_*.json
+python analytics/scripts/data_pull_01.py copart vpic_apibara_copart_*.json
 ```
 
 ### Reading open lots
@@ -100,8 +142,8 @@ same lot automatically.
 Stage 2 is documented here. Run
 `python analytics/scripts/apibara_json2csv_iaai_01.py --schema` to print the same
 mapping from the code — the script's `SCHEMA` list is the single source of truth
-and this document is generated from it. Stage 3 adds six more columns, listed at
-the bottom.
+and this document is generated from it. Stage 3 adds three default columns
+(`tier`, `tier_source`, `sold_period`) plus optional history columns.
 
 **IAAI ONLY.** Copart gets its own flattener. Not tidiness — Copart records carry
 `details: None`, which deletes `ActualCashValue`, `EstimatedRepairCost`, body
@@ -125,7 +167,7 @@ an Apibara pull of the same 2018 A5s:
 | `details.vehicle_description` | 14/16 byte-identical |
 | `details.sale_information` | 7/10 byte-identical |
 
-A second 57-column flattener would be two copies of one mapping, drifting apart
+A second IAAI flattener would be two copies of one mapping, drifting apart
 on every edit. `iaai_web_adapt_01.py` instead rebuilds the derived blocks
 Apibara layers on top (`vehicle_specs`, `condition`, `odometer`, `pricing`,
 `sale_document`, `seller`, `auction`, `media`) and hands the result to the
@@ -475,7 +517,7 @@ everywhere; it is simply no longer required.
 
 ## Key fields only
 
-57 columns, one per fact. Duplicates were removed after measuring them across the
+69 columns, one per fact. Duplicates were removed after measuring them across the
 70-lot reference pull, not by eye — `vehicle_class` was identical to `body_style`
 on every row, `key_fob` to `has_key`, `location_display` to `selling_branch`,
 while `primary_damage_code`, `acv_raw`, `est_repair_raw`, `body_style_name` and
@@ -1081,11 +1123,18 @@ Takes a csv-cut, applies extra filters, and downloads each lot's photos to
 images/open/{Make Model}/{FRONT|REAR-SIDE|OTHER}/{platform}/[{year}-][{dist}-]{lot}-{vin}[-{score}][-${buynow}]/{lot}_001.jpg …
 ```
 
-URLs are rebuilt from `iaai_image_url_prefix` + `iaai_image_keys`, so the CSV is
-the only input. `--size` picks dimensions (`thumb` 400x300, `large` 845x633,
-**`xl` 1600x1200 default**, `full` 2576x1932) — the resizer honours whatever is
-asked. `xl` is the default because damage is what these photos are for and 845px
-is too small to judge it; measured ~350–580 KB per image.
+For IAAI, URLs are rebuilt from `iaai_image_url_prefix` + `iaai_image_keys`, so
+the CSV is the only input. `--size` picks dimensions (`thumb` 400x300, `large`
+845x633, **`xl` 1600x1200 default**, `full` 2576x1932) — the resizer honours
+whatever is asked. `xl` is the default because damage is what these photos are
+for and 845px is too small to judge it; measured ~350–580 KB per image.
+
+For Copart, `copart_image_urls` stores `media.items[].large` as pipe-joined,
+direct `_hrs.jpg`/`_vhrs.jpg` URLs. The downloader detects the Copart column,
+uses those URLs verbatim, numbers them stably in CSV order, and ignores `--size`
+because there is no equivalent Copart resizer contract. In the US S5 reference
+cut all 3,167 URL entries match their row's `image_count`; live probes of both
+suffix variants returned HTTP 200 JPEGs at 1280x960.
 
 This does **not** replace `app/image_pipeline.py`, it complements it. That module
 builds the SOLD archive — keyed by VIN, bucketed tier / make-model / distance /
@@ -1513,9 +1562,12 @@ A very wide range fails outright rather than clamping: `2025-01-01..2026-02-23`
 with no model filter returned **HTTP 502 `Vehicle API request failed`**. Keep
 requested ranges inside the retention window.
 
-## Copart differences (for the future `apibara_json2csv_copart_01.py`)
+## Copart differences and vPIC enrichment
 
-Measured on a 20-lot Copart pull:
+The raw-schema comparison was first measured on 20 lots. The source cohort is a
+complete 290-record, 289-unique-VIN Audi S5 2018–2023 ended archive pulled for
+2026-02-17 through 2026-08-17. Its adapted/CSV cohort is 259 US records (258
+unique VINs); 31 Canadian records remain only in json-raw.
 
 | Column group | IAAI | Copart |
 |---|---|---|
@@ -1531,3 +1583,241 @@ The practical consequence: **IAAI lots are self-pricing and Copart lots are not.
 `acv_usd` is the insurer's own clean-value figure and `est_repair_usd` its repair
 estimate, so an IAAI row carries everything the max-bid calculation needs without
 a MarketCheck call. A Copart row needs an external clean value.
+
+### Copart web source — open-lot raw capture
+
+`pull_copart_web_01.py` mirrors the archive-first idea of the IAAI web pull but
+uses Copart's first-party `POST /public/lots/search` JSON response. It defaults
+to six queries—2018 through 2023 Audi S5—and writes to
+`data/open/json-raw/copart/copartweb_*.json`. It spends neither an APIBara call
+nor an API key.
+
+The visible free-form query is not an identity constraint, and Copart's model
+group is literally `S5/RS5`. Each request therefore sends exact `YEAR`, `MAKE`,
+and model-description `MODL` facets (not the shared `MODLG` group), then applies
+a second exact year/make/model gate to `lcy`, `mkn`, and `lm`. Rejected rows stay
+inside the verbatim raw response and are listed in `excluded_identity`; only
+verified S5 rows appear in root `records`.
+
+The 2026-08-17 reference pull returned 73 exact unique open lots with no
+truncation:
+
+| year | exact rows |
+|---:|---:|
+| 2018 | 45 |
+| 2019 | 16 |
+| 2020 | 2 |
+| 2021 | 7 |
+| 2022 | 1 |
+| 2023 | 2 |
+
+All 73 were explicitly U.S. in that snapshot. That observation does not relax
+the policy: this raw source retains all returned markets, and the future web
+adapter must fail closed to U.S.-identified rows before vPIC or CSV.
+
+With `--details`, each exact record first tries Copart's public lot-details JSON
+and falls back to its collected lot URL. The archive stores status, content
+type, SHA-256, challenge/error reason, and any successful raw response. Seller
+classification is deliberately three-way: an explicit type or known insurer
+name becomes `insurance`, a visible non-insurer becomes `other`, and missing
+evidence remains `unknown`.
+
+The reference detail pass made 140 detail HTTP attempts for 73 lots: 6 JSON
+responses succeeded and 67 lots were challenged after fallback. Four search
+rows had `showSeller=true`, but all four detail requests were challenged; the
+six successful rows had no published seller data. Consequently the correct
+measured seller distribution is `unknown: 73`, not `other: 73`. A production
+seller enrichment needs a normal authenticated/browser session or another
+licensed source; the raw archive preserves enough failure provenance to retry
+later without overstating coverage.
+
+### Stage 1.5 — NHTSA vPIC
+
+`copart_vpic_adapt_01.py` uses the public
+[NHTSA vPIC API](https://vpic.nhtsa.dot.gov/api/Home/Index) and accepts Copart
+`ended`, `open`, or `live` archives.
+The mode in the archive—not its filename—selects the matching sold/open output:
+
+```text
+data/sold/json-raw/copart/apibara_*.json
+    -> data/sold/json-adapted/copart/vpic_apibara_*.json
+
+data/open/json-raw/copart/apibara_*.json
+    -> data/open/json-adapted/copart/vpic_apibara_*.json
+```
+
+The raw archive remains byte-identical. Before any VIN decode, the adapter
+classifies the branch from location display, facility state, and postal-code
+fallbacks. Only positively identified US lots continue; Canada and unknown
+market fail closed. The derived root records the policy, counts, markets, and
+excluded lot numbers in `adapter.market_scope` so the loss is auditable.
+
+Every non-empty vPIC response value is kept in
+`records[].enrichment.nhtsa_vpic.raw_nonempty`, while these useful values fill
+only missing `vehicle_specs` paths:
+
+| adapted field | raw Copart US | after vPIC (259 records) |
+|---|---:|---:|
+| body style / trim / doors | 0 | **259** |
+| engine cylinders / horsepower | 0 | **259** |
+| series | 0 | **226** |
+| engine configuration | 0 | **189** |
+| country of origin / manufacturer / vehicle type | 0 | **259** |
+| fuel / drive / transmission | 255 / 255 / 257 | **259 / 259 / 259** |
+
+The current US-only run filled 2,663 missing values from 258 cached VIN decodes
+with zero HTTP calls. The vPIC cache is shared between sold and open archives,
+so later adaptations are offline with `--cache-only`.
+
+Identity is validation-only: VIN, year, make, and model are never overwritten.
+Lot `69268225` demonstrates why. APIBara labels VIN `WAUCGBFR7FA001382` as a
+2018 S5, but vPIC reports model-year mismatch code 12; decoding without the
+asserted year identifies a 2015 S5. The adapted row keeps APIBara's 2018 and
+records `source_year: 2018`, `decoded_year: 2015`, `year_mismatch: true`, and a
+conflict with resolution `kept_apibara`.
+
+### Stage 2 — Copart csv-raw
+
+`apibara_json2csv_copart_01.py` accepts either raw APIBara Copart JSON or the
+vPIC-adapted JSON. With no filename it selects the newest archive across the
+sold/open raw and adapted folders; after a normal enrichment run, that is the
+adapted file. A raw input still converts, but its vPIC-derived spec columns are
+blank. Input records are independently filtered through the same US-only
+classifier, so bypassing stage 1.5 cannot leak Canadian lots into a CSV.
+
+The schema has 89 columns. It retains the common analytical names used by IAAI
+where the facts really are the same, and adds Copart-specific fields rather than
+forcing IAAI-only concepts into empty columns:
+
+- vPIC trim, series, body class, engine and identity-conflict audit fields;
+- Copart listing/title, sale-document flags and seller type;
+- native sale/bid/buy-now amounts plus strictly guarded `*_usd` fields;
+- APIBara's cost-range fields under their explicit `apibara_` prefix (they are
+  not relabelled as ACV);
+- location, exact-or-approximate distance, and `distance_source`;
+- pipe-joined, downloader-ready Copart image URLs and the first video URL;
+- raw/adapted source filenames and both pull/adaptation timestamps.
+
+The market guard is a boundary, not just a currency conversion rule. On the S5
+source cohort, 31/290 lots are Canadian. They remain in json-raw for provenance,
+are listed in the adapter audit, and do not appear in json-adapted, csv-raw, or
+csv-cut. The lower-level `*_usd` currency check remains as defense in depth.
+
+Distance uses `facility.lat/lng` when available and otherwise the existing
+`app.branch_geo` city/state approximation. The US-only reference output has 19
+exact and 240 approximate distances, with none missing.
+
+```bash
+# canonical US-only stage-2 file: 259 rows x 89 columns
+python analytics/scripts/apibara_json2csv_copart_01.py vpic_apibara_copart_*.json
+
+# stage 3: same US-only mapping + tier, tier_source, sold_period = 92 columns
+python analytics/scripts/data_pull_01.py copart vpic_apibara_copart_*.json
+```
+
+The stage-3 command imports the flattener and reads JSON again; it does **not**
+read the physical csv-raw file. This matches the IAAI branch. `csv-raw` is the
+canonical unfiltered materialisation, while `csv-cut` is a separately generated
+view with filters and operator/auto enrichment.
+
+When raw and adapted observations of the same lot are loaded together, the
+newest auction/pricing record wins while the newest available vPIC static specs
+fill its blanks. This prevents a fresh open raw pull from erasing cached VIN
+enrichment before its own adapter run.
+
+### Should Copart's own sales CSV be archived before auctions?
+
+**Yes, as a prospective first-party snapshot—not as historical backfill.**
+Copart describes its
+[sales-data download](https://www.copart.com/content/us/en/buyer/sales/download-sales-data)
+as current scheduled inventory and updates it frequently (currently about every
+15 minutes). Once a lot leaves that feed, the download does not recreate a
+six-month historical cohort. The 259 US lots in the current adapted S5 cohort
+can only join CSV data that was archived while those lots were still scheduled.
+
+The APIBara side of the S5 cohort shows where a CSV snapshot can add real value:
+
+| candidate CSV field | APIBara coverage | value after vPIC |
+|---|---:|---|
+| estimated retail value / ACV | **0/259** | High: clean-value starting point |
+| estimated repair cost | **0/259** | High: repair floor, still needs photo review |
+| secondary damage | **0/259** | High: risk/filter signal |
+| yard name / ZIP | **0/259 / 28/259** | Medium-high: transport and exact-location join |
+| body style | 0/259 raw, 259/259 vPIC | Low-medium: first-party verification |
+| primary damage, color, title, run condition, date, odometer, keys | 259/259 | Mostly duplicate/verification |
+| high bid | 257/259 | Snapshot value only; pre-auction CSV is not the final sale result |
+
+Recommended capture/join design for the next stage:
+
+1. Store each untouched member download in a new source layer such as
+   `data/open/csv-source/copart/`, timestamped at download time. Do not put it
+   in `csv-raw/`; that layer already means normalized stage-2 output.
+2. Normalize it separately and join by string-normalized `lot_number`, with
+   full VIN as a required identity check when present.
+3. Carry the latest pre-sale non-empty values into the sold adapted JSON under
+   `enrichment.copart_sales_csv`, retaining source filename, snapshot time,
+   original headers, and conflicts. Never rewrite APIBara raw JSON.
+4. Re-download on a schedule if bid movement matters. A single pre-sale CSV
+   captures attributes; repeated snapshots create a bid/time series.
+
+The existing `app/copart_csv.py` already anticipates most candidate headers,
+but no sample CSV is archived in this repository. Before making the analytics
+join production code, save one real download so header names, lot-number
+formatting, field coverage, and match rate can be tested rather than guessed.
+
+## IAAI's null date is 1899-12-31, and it parses
+
+`attributes.AuctionDateTime` reads `12/31/1899 6:00:00 AM +00:00` on a lot with
+no sale scheduled — a .NET default, present on **1,234 records**. It parses
+cleanly into a real-looking timestamp, which is exactly what makes it dangerous:
+
+- `auction_at` carried a bogus 1899 date instead of being blank
+- relist detection counted the day a lot finally got scheduled as a **date
+  change**, so an `Auction Not Assigned` lot being scheduled for the first time
+  read as a reschedule
+
+It accounted for **5 of 13 reported relists** — 38% of the signal was noise.
+`iaai_web_adapt_01.parse_dt()` now returns `None` for any year before 2000.
+
+The general lesson: a sentinel that parses is worse than one that fails, because
+nothing downstream has any reason to question it.
+
+## The sale tag: three states, in IAAI's local time
+
+The trailing folder segment says what a lot's sale status is, in the vocabulary
+the site uses:
+
+```
+Auction Not Assigned  ->  (nothing)          nothing to say yet
+TimedAuction          ->  BidNow             biddable online right now
+Prebid / Prebid+BuyNow -> PreBid-0820-Th     sale date known
+```
+
+`auction_local_tag` (`MMDD-Dy`) is built from
+`auctionInformation.saleInformation`, which stores day/month/date as separate
+fields — no free-text parsing, populated on 267 of 267 scheduled lots.
+
+**It is deliberately NOT derived from `auction_at`, which is UTC.** IAAI prints
+branch-local time on both the search row and the lot page — `Thu Aug 20, 11:30am
+CDT` where `auction_at` says `16:30Z`. Those agree on the calendar day for every
+current lot (0 of 267 differ, because IAAI sells in the morning), but a folder
+stamped from UTC would silently disagree with the site the first time a sale ran
+late enough in the evening.
+
+### The 1899 sentinel has a local form too
+
+Nulling the UTC date was not enough. An unscheduled lot renders locally as
+**"Sun Dec 31"**, which produced a perfectly plausible `1231-Su` tag on **517
+lots — every one of them `Auction Not Assigned`**. The local date is now gated on
+the UTC field parsing to a real date, so the two representations cannot disagree.
+
+A sentinel that survives in a second representation is the same trap twice: the
+first fix looked complete because the obvious field was clean.
+
+### Parsing keeps up
+
+Two segments now contain hyphens — `No-Keys` and `PreBid-0820-Th` — so splitting
+on `-` shatters them. Both are rejoined before anything else reads the tokens,
+anchored on strings nothing else can produce (`No`+`Keys`, and `PreBid`). Lot and
+VIN are still lifted out by width first, which is what keeps the rest
+unambiguous.

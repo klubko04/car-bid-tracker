@@ -20,7 +20,7 @@ web pull and an Apibara pull of the same 2018 A5s:
     vehicle_description   14/16 byte-identical
     sale_information       7/10 byte-identical
 
-So a second 57-column flattener would be two copies of one mapping, drifting
+So a second IAAI flattener would be two copies of one mapping, drifting
 apart on every edit. Instead this script rebuilds the handful of *derived*
 blocks Apibara adds on top of the shared payload — vehicle_specs, condition,
 odometer, pricing, sale_document, seller, auction, media — and hands the result
@@ -178,6 +178,13 @@ def parse_dt(s):
             hh += 12
         elif ampm == "AM" and hh == 12:
             hh = 0
+    # IAAI writes a .NET null date — "12/31/1899 6:00:00 AM +00:00" — for a lot
+    # with no sale scheduled, on 1,234 records and counting. Parsing it into a
+    # real timestamp made an `Auction Not Assigned` lot look like it HAD an
+    # auction date, so the day it finally got scheduled read as a relist: 5 of
+    # 13 reported relists were this sentinel, not reschedules.
+    if int(y) < 2000:
+        return None
     tz = (tz or "+00:00").replace(":", "")
     tz = f"{tz[:3]}:{tz[3:]}"
     return (f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
@@ -265,6 +272,45 @@ def view_flag(rec, key):
     """One flag off inventoryView, which the fields lift does not cover."""
     view = ((rec.get("detail") or {}).get("view_model") or {}).get("inventoryView") or {}
     return view.get(key)
+
+
+_MONTHS = {m: i for i, m in enumerate(
+    "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
+
+
+def local_auction(rec):
+    """IAAI's own LOCAL sale date, e.g. ('Tue', 8, 18) for "Tue Aug 18, 8:30am CDT".
+
+    Taken from auctionInformation.saleInformation, which stores day/month/date
+    as separate fields — no free-text parsing, and populated on 267 of 267
+    scheduled lots.
+
+    Deliberately NOT derived from attributes.AuctionDateTime, which is UTC. IAAI
+    prints branch-local time on both the search row and the lot page, and a sale
+    late enough in the evening falls on a different UTC calendar day. It happens
+    to match on every current lot (0 of 267 differ, because IAAI sells in the
+    morning), but a folder stamped from UTC would silently disagree with the
+    site the first time it did not.
+    """
+    # The 1899 null date has a LOCAL form too: an unscheduled lot renders as
+    # "Sun Dec 31", which produced a plausible-looking 1231-Su tag on 517 lots —
+    # every one of them Auction Not Assigned. Gate on the UTC field actually
+    # parsing to a real date, which already rejects the sentinel, so the two
+    # representations cannot disagree.
+    attrs = ((rec.get("detail") or {}).get("fields") or {}).get("attributes") or {}
+    if not parse_dt(attrs.get("AuctionDateTime")):
+        return None
+
+    ai = (((rec.get("detail") or {}).get("view_model") or {})
+          .get("auctionInformation") or {}).get("saleInformation") or {}
+    day, mon, date = ai.get("day"), ai.get("month"), ai.get("date")
+    if not (day and mon and date):
+        return None
+    try:
+        return {"day": str(day), "month": _MONTHS.get(str(mon)[:3].title()),
+                "date": int(date), "time": ai.get("liveDateString") or ""}
+    except (TypeError, ValueError):
+        return None
 
 
 def who_can_buy(rec):
@@ -418,6 +464,7 @@ def adapt(rec):
             # sale from a disappearance, which cannot distinguish sold from
             # withdrawn.
             "sold_buy_now": bool(view_flag(rec, "buyNowSold")),
+            "local": local_auction(rec),
         },
         "location": {"display": txt(a.get("BranchName")),
                      "state": txt(a.get("BranchState"))},

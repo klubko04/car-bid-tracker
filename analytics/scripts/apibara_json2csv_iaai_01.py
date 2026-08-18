@@ -1,9 +1,10 @@
 """
 Stage 2 of the analytics pipeline — IAAI raw JSON -> analysis-ready CSV.
 
-    pull_apibara_01.py  ->  raw .json  ->  THIS SCRIPT  ->  .csv
-                                              |
-                                        data_pull_01.py  ->  + tier, sold_period
+    pull_apibara_01.py  ->  raw .json  ->  THIS SCRIPT  ->  csv-raw
+                                  |
+                                  +----> data_pull_01.py -> csv-cut
+                                        (+ tier, tier_source, sold_period)
 
 This script owns everything derivable from the record alone, distance included.
 `tier` and `sold_period` are NOT emitted here — tier takes an operator decision
@@ -13,7 +14,7 @@ Reads the archives written by pull_apibara_01.py, flattens each IAAI record into
 one row, and applies whatever filtering you ask for. No network, no API calls —
 run it as often as you like, with different filters, against the same archive.
 
-KEY FIELDS ONLY — 57 columns, one per fact
+KEY FIELDS ONLY — 69 columns, one per fact
 ------------------------------------------
 Duplicates were removed after measuring them across a 70-lot pull, not by eye:
 `vehicle_class` was identical to `body_style` on every row, `key_fob` to
@@ -478,6 +479,20 @@ def video_fields(v):
 # --------------------------------------------------------------------------
 # derived: listing state
 # --------------------------------------------------------------------------
+_DAY2 = {"mon": "Mo", "tue": "Tu", "wed": "We", "thu": "Th",
+         "fri": "Fr", "sat": "Sa", "sun": "Su"}
+
+
+def local_tag(v):
+    """-> 'MMDD-Dy' from IAAI's local sale date, or '' when unscheduled."""
+    loc = g(v, "auction", "local") or {}
+    day, mon, date = loc.get("day"), loc.get("month"), loc.get("date")
+    if not (day and mon and date):
+        return ""
+    d2 = _DAY2.get(str(day)[:3].lower())
+    return f"{int(mon):02d}{int(date):02d}-{d2}" if d2 else ""
+
+
 def listing_state(v):
     """IAAI's own listing state, in IAAI's vocabulary, from either source.
 
@@ -596,6 +611,9 @@ SCHEMA = [
     ("listing_state",       listing_state,                                    "calc"),
     # Hard close of a timed/online-only sale, which can fall DAYS before
     # auction_at. Empty on ordinary live-lane lots.
+    # IAAI's branch-LOCAL sale date as "MMDD-Dy" (0820-Th). The site prints
+    # local time; auction_at is UTC. Blank on Apibara rows and on unscheduled lots.
+    ("auction_local_tag",   lambda v: local_tag(v),                           "calc"),
     ("timed_close_at",      lambda v: g(v, "auction", "timed_end_at")
                             or clean(attrs(v).get("TimedAuctionCloseDateTime")), "raw"),
     # Buy Now expiry, and IAAI's own "this went via Buy Now" flag. The flag is
@@ -846,6 +864,7 @@ SOURCE_HINTS = {
     "last_sold_day": "auction.last_sold_day",
     "last_sold_status": "auction.last_sold_status",
     "listing_state": "_web_state, else derived from InventoryStatus RS/WC + dates",
+    "auction_local_tag": "auction.local -> MMDD-Dy in IAAI's branch-local time",
     "timed_close_at": "auction.timed_end_at (fallback attributes.TimedAuctionCloseDateTime)",
     "buy_now_close_at": "auction.buy_now_close_at (fallback attributes.BuyNowCloseDateTime)",
     "buy_now_sold": "auction.sold_buy_now — set while still listed",

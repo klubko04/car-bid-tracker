@@ -1,7 +1,9 @@
 """
 Apibara pull — stage 1 of the analytics pipeline. RAW JSON ONLY.
 
-    pull_apibara_01.py  ->  raw .json  ->  apibara_json2csv_<platform>_01.py  ->  .csv
+    pull_apibara_01.py  ->  raw .json
+        iaai   -> apibara_json2csv_iaai_01.py
+        copart -> copart_vpic_adapt_01.py -> future Copart flattener
 
 This script does exactly two things: build a server-side query, and archive the
 untouched responses. It applies NO filtering and derives NO fields — every
@@ -385,8 +387,12 @@ def main(argv=None):
     print("\n" + "=" * 78)
     print(f"Done. {calls} API call(s) used.")
     print(f"  JSON -> {out_path}")
-    print(f"  next: python analytics/scripts/apibara_json2csv_{args.platform}"
-          f"_01.py {out_path.name}")
+    if args.platform == "copart":
+        print("  next: python analytics/scripts/copart_vpic_adapt_01.py "
+              f"{out_path.name}")
+    else:
+        print("  next: python analytics/scripts/apibara_json2csv_iaai_01.py "
+              f"{out_path.name}")
     return 0
 
 

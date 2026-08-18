@@ -1,21 +1,51 @@
-"""Rebuild the .cc-discussion log as a VERBATIM copy of the chat.
+"""Rebuild a .cc-discussion log as a VERBATIM copy of a chat.
 
 No summarising. User prompts, assistant output, tool calls and tool results are
 copied exactly as they appear in the session JSONL.
 
-Thinking blocks are present in the log (357 of them) but their text is EMPTY —
-only a cryptographic signature is persisted. They are emitted as explicit
-placeholders rather than reconstructed, because reconstructing them would mean
-inventing a record of reasoning that was never saved.
+Thinking blocks are present in the logs but their text is EMPTY — only a
+cryptographic signature is persisted. They are emitted as explicit placeholders
+rather than reconstructed, because reconstructing them would mean inventing a
+record of reasoning that was never saved.
+
+    python analytics/scripts/build_chat_transcript.py                 # all logs
+    python analytics/scripts/build_chat_transcript.py copart-seller   # just one
+    python analytics/scripts/build_chat_transcript.py --list
+
+A new chat is added by appending one entry to SESSIONS. Everything else —
+framing, warnings, provenance line — is generated from it.
 """
+from __future__ import annotations
+
+import argparse
 import json
 import pathlib
 import re
 
-T = ("/home/striker/.claude/projects/-home-striker-projects-car-bid-tracker/"
-     "1de5f512-27cc-4a6f-a0ee-152360548399.jsonl")
-OUT = pathlib.Path("/home/striker/projects/car-bid-tracker/.cc-discussion/"
-                   "Build analytics pipeline script from test files.md")
+CLAUDE_PROJECT = pathlib.Path(
+    "/home/striker/.claude/projects/-home-striker-projects-car-bid-tracker")
+OUT_DIR = pathlib.Path("/home/striker/projects/car-bid-tracker/.cc-discussion")
+
+# key -> everything that differs between one chat log and another.
+SESSIONS = {
+    "analytics-pipeline": {
+        "session": "1de5f512-27cc-4a6f-a0ee-152360548399",
+        "filename": "Build analytics pipeline script from test files.md",
+        "title": "Build analytics pipeline script from test files",
+        "started": "2026-08-12",
+        "tags": ["car-bid-tracker", "apibara", "iaai", "salvage-auction",
+                 "analytics-pipeline", "web-scraping", "csv-schema", "images"],
+    },
+    "copart-seller": {
+        "session": "f9ce10de-97e4-4bef-be41-cde0b7999bb6",
+        "filename": "Assess Copart pipeline for Audi S5 seller type.md",
+        "title": "Assess Copart pipeline for Audi S5 seller type",
+        "started": "2026-08-17",
+        "tags": ["car-bid-tracker", "copart", "apibara", "salvage-auction",
+                 "seller-classification", "insurance", "web-scraping",
+                 "nhtsa-vpic", "code-review"],
+    },
+}
 
 SKIP_TYPES = {"queue-operation", "ai-title", "last-prompt", "mode",
               "file-history-snapshot", "file-history-delta", "system"}
@@ -58,58 +88,65 @@ def blocks_of(rec):
     return c if isinstance(c, list) else []
 
 
-# ---------------------------------------------------------------- collect
-records = []
-for line in open(T, encoding="utf-8"):
-    try:
-        d = json.loads(line)
-    except Exception:
-        continue
-    if d.get("type") in SKIP_TYPES:
-        continue
-    if d.get("type") == "attachment":
-        a = d.get("attachment") or {}
-        if a.get("type") not in ATTACH_KEEP:
-            # keep a todo list only when it actually has items
-            if not (a.get("type") == "todo_reminder" and a.get("itemCount")):
+def load(path):
+    records = []
+    with open(path, encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                d = json.loads(line)
+            except Exception:
                 continue
-    records.append(d)
+            if d.get("type") in SKIP_TYPES:
+                continue
+            if d.get("type") == "attachment":
+                a = d.get("attachment") or {}
+                if a.get("type") not in ATTACH_KEEP:
+                    # keep a todo list only when it actually has items
+                    if not (a.get("type") == "todo_reminder" and a.get("itemCount")):
+                        continue
+            records.append(d)
+    return records
 
-# tool_use id -> result payload, so a call and its output sit together
-results = {}
-for d in records:
-    for b in blocks_of(d):
-        if isinstance(b, dict) and b.get("type") == "tool_result":
-            cc = b.get("content")
-            if isinstance(cc, list):
-                cc = "\n".join(x.get("text", "") for x in cc
-                               if isinstance(x, dict) and x.get("type") == "text")
-            results[b.get("tool_use_id")] = cc if isinstance(cc, str) else json.dumps(cc, indent=2)
 
-HEAD = """---
-title: Build analytics pipeline script from test files
+def thinking_stats(records):
+    """Count thinking blocks and how much of their text actually survived."""
+    blocks = characters = 0
+    for d in records:
+        for b in blocks_of(d):
+            if isinstance(b, dict) and b.get("type") == "thinking":
+                blocks += 1
+                characters += len(b.get("thinking") or "")
+    return blocks, characters
+
+
+def header(meta, session_path, records, updated):
+    blocks, characters = thinking_stats(records)
+    tags = ", ".join(meta["tags"])
+    retained = (f"{characters:,} characters of thinking text ARE present"
+                if characters else
+                f"**0 characters** of thinking text across all {blocks} of them")
+    return f"""---
+title: {meta["title"]}
 project: car-bid-tracker
 tool: Claude Code (Opus 5)
-started: 2026-08-12
-updated: 2026-08-16
+started: {meta["started"]}
+updated: {updated}
 status: ongoing
 type: chat-transcript
-tags: [car-bid-tracker, apibara, iaai, salvage-auction, analytics-pipeline, web-scraping, csv-schema, images]
+tags: [{tags}]
 ---
 
-# Build analytics pipeline script from test files
+# {meta["title"]}
 
 **Verbatim copy of the chat.** User prompts, assistant output, tool calls and tool
 results are reproduced exactly as recorded in the session log — nothing summarised,
 nothing paraphrased, nothing reordered.
 
 > [!warning] Thinking blocks are not recoverable
-> The session log contains 357+ thinking blocks, but each stores an **empty**
-> `thinking` string plus a cryptographic `signature` and nothing else. Verified
-> twice: by measuring every block (0 characters of thinking text across all of
-> them), and by walking every field of a full assistant record — the only long
-> string anywhere in it is the signature. The reasoning text is never written to
-> disk.
+> This session log contains **{blocks}** thinking blocks, and every one stores an
+> **empty** `thinking` string plus a cryptographic `signature` and nothing else.
+> Measured directly on this log: {retained}. The reasoning text is never written
+> to disk by the harness.
 >
 > They appear below as `*[thinking block — content not retained in the session
 > log]*` placeholders, positioned where the thinking happened. They are **not**
@@ -123,92 +160,143 @@ nothing paraphrased, nothing reordered.
 > current one arrives with the next rebuild. Nothing is lost — it just trails by
 > one message.
 
-Source: `~/.claude/projects/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399.jsonl`
+Source: `~/.claude/projects/-home-striker-projects-car-bid-tracker/{session_path.name}`
 
 ---
 
 """
 
-body = []
-prompt_n = 0
-pending_header = False
 
-for d in records:
-    kind = d.get("type")
-    bs = blocks_of(d)
+def render(records):
+    # tool_use id -> result payload, so a call and its output sit together
+    results = {}
+    for d in records:
+        for b in blocks_of(d):
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                cc = b.get("content")
+                if isinstance(cc, list):
+                    cc = "\n".join(x.get("text", "") for x in cc
+                                   if isinstance(x, dict) and x.get("type") == "text")
+                results[b.get("tool_use_id")] = (
+                    cc if isinstance(cc, str) else json.dumps(cc, indent=2))
 
-    if kind == "attachment":
-        a = d.get("attachment") or {}
-        at = a.get("type")
-        if at == "date_change":
-            body.append(f"\n*[date changed to {a.get('newDate')}]*\n")
-        elif at == "edited_text_file":
-            body.append(f"\n<details>\n<summary>*[user edited "
-                        f"{a.get('filename')} outside the chat]*</summary>\n\n"
-                        f"{fence(a.get('snippet') or '')}\n</details>\n")
-        elif at == "compact_file_reference":
-            body.append(f"\n*[file carried across compaction: "
-                        f"{a.get('displayPath') or a.get('filename')}]*\n")
-        elif at == "file":
-            c = a.get("content") or {}
-            inner = (c.get("file") or {}) if isinstance(c, dict) else {}
-            body.append(f"\n<details>\n<summary>*[file attached: "
-                        f"{a.get('displayPath') or a.get('filename')}]*</summary>\n\n"
-                        f"{fence(inner.get('content') or '')}\n</details>\n")
-        elif at == "todo_reminder":
-            body.append(f"\n<details>\n<summary>*[todo list — "
-                        f"{a.get('itemCount')} items]*</summary>\n\n"
-                        f"{fence(json.dumps(a.get('content'), indent=2), 'json')}\n</details>\n")
-        continue
+    body = []
+    prompt_n = 0
 
-    if kind == "user":
-        # a user record is either a real prompt or a tool_result carrier
-        texts = [b.get("text", "") for b in bs
-                 if isinstance(b, dict) and b.get("type") == "text"]
-        joined = clean_user("\n".join(texts))
-        if not joined:
+    for d in records:
+        kind = d.get("type")
+        bs = blocks_of(d)
+
+        if kind == "attachment":
+            a = d.get("attachment") or {}
+            at = a.get("type")
+            if at == "date_change":
+                body.append(f"\n*[date changed to {a.get('newDate')}]*\n")
+            elif at == "edited_text_file":
+                body.append(f"\n<details>\n<summary>*[user edited "
+                            f"{a.get('filename')} outside the chat]*</summary>\n\n"
+                            f"{fence(a.get('snippet') or '')}\n</details>\n")
+            elif at == "compact_file_reference":
+                body.append(f"\n*[file carried across compaction: "
+                            f"{a.get('displayPath') or a.get('filename')}]*\n")
+            elif at == "file":
+                c = a.get("content") or {}
+                inner = (c.get("file") or {}) if isinstance(c, dict) else {}
+                body.append(f"\n<details>\n<summary>*[file attached: "
+                            f"{a.get('displayPath') or a.get('filename')}]*</summary>\n\n"
+                            f"{fence(inner.get('content') or '')}\n</details>\n")
+            elif at == "todo_reminder":
+                body.append(f"\n<details>\n<summary>*[todo list — "
+                            f"{a.get('itemCount')} items]*</summary>\n\n"
+                            f"{fence(json.dumps(a.get('content'), indent=2), 'json')}\n</details>\n")
             continue
-        prompt_n += 1
-        body.append(f"\n## Prompt {prompt_n}\n\n{fence(joined)}\n\n### Response\n")
-        continue
 
-    if kind != "assistant":
-        continue
-
-    for b in bs:
-        if not isinstance(b, dict):
+        if kind == "user":
+            # a user record is either a real prompt or a tool_result carrier
+            texts = [b.get("text", "") for b in bs
+                     if isinstance(b, dict) and b.get("type") == "text"]
+            joined = clean_user("\n".join(texts))
+            if not joined:
+                continue
+            prompt_n += 1
+            body.append(f"\n## Prompt {prompt_n}\n\n{fence(joined)}\n\n### Response\n")
             continue
-        bt = b.get("type")
-        if bt == "thinking":
-            body.append("\n*[thinking block — content not retained in the session log]*\n")
-        elif bt == "text":
-            txt = (b.get("text") or "").strip()
-            if txt:
-                body.append("\n" + txt + "\n")
-        elif bt == "tool_use":
-            name = b.get("name", "?")
-            inp = b.get("input") or {}
-            label = (inp.get("description") or inp.get("file_path")
-                     or inp.get("prompt") or inp.get("query") or inp.get("skill") or "")
-            label = str(label).splitlines()[0][:90] if label else ""
-            head = f"**Tool — {name}**" + (f": {label}" if label else "")
-            # command / body first, as the chat shows it
-            if name == "Bash":
-                payload = fence(inp.get("command", ""), "bash")
-            elif name in ("Write",):
-                payload = fence(inp.get("content", ""))
-            elif name in ("Edit",):
-                payload = ("*old_string*\n" + fence(inp.get("old_string", "")) +
-                           "\n*new_string*\n" + fence(inp.get("new_string", "")))
-            else:
-                payload = fence(json.dumps(inp, indent=2), "json")
-            res = results.get(b.get("id"))
-            out = f"\n*Result*\n{fence(res)}\n" if res else ""
-            body.append(f"\n<details>\n<summary>{head}</summary>\n\n{payload}\n{out}\n</details>\n")
 
-OUT.parent.mkdir(parents=True, exist_ok=True)
-OUT.write_text(HEAD + "".join(body), encoding="utf-8")
-txt = OUT.read_text(encoding="utf-8")
-print(f"wrote {OUT}")
-print(f"  {prompt_n} prompts, {len(txt):,} chars, {len(txt.splitlines()):,} lines, "
-      f"{OUT.stat().st_size/1e6:.2f} MB")
+        if kind != "assistant":
+            continue
+
+        for b in bs:
+            if not isinstance(b, dict):
+                continue
+            bt = b.get("type")
+            if bt == "thinking":
+                body.append("\n*[thinking block — content not retained in the session log]*\n")
+            elif bt == "text":
+                txt = (b.get("text") or "").strip()
+                if txt:
+                    body.append("\n" + txt + "\n")
+            elif bt == "tool_use":
+                name = b.get("name", "?")
+                inp = b.get("input") or {}
+                label = (inp.get("description") or inp.get("file_path")
+                         or inp.get("prompt") or inp.get("query") or inp.get("skill") or "")
+                label = str(label).splitlines()[0][:90] if label else ""
+                head = f"**Tool — {name}**" + (f": {label}" if label else "")
+                # command / body first, as the chat shows it
+                if name == "Bash":
+                    payload = fence(inp.get("command", ""), "bash")
+                elif name in ("Write",):
+                    payload = fence(inp.get("content", ""))
+                elif name in ("Edit",):
+                    payload = ("*old_string*\n" + fence(inp.get("old_string", "")) +
+                               "\n*new_string*\n" + fence(inp.get("new_string", "")))
+                else:
+                    payload = fence(json.dumps(inp, indent=2), "json")
+                res = results.get(b.get("id"))
+                out = f"\n*Result*\n{fence(res)}\n" if res else ""
+                body.append(f"\n<details>\n<summary>{head}</summary>\n\n"
+                            f"{payload}\n{out}\n</details>\n")
+
+    return "".join(body), prompt_n
+
+
+def build(key, meta):
+    session_path = CLAUDE_PROJECT / f"{meta['session']}.jsonl"
+    if not session_path.exists():
+        print(f"  !! {key}: no session log at {session_path}")
+        return
+    out_path = OUT_DIR / meta["filename"]
+    records = load(session_path)
+    updated = __import__("datetime").date.fromtimestamp(
+        session_path.stat().st_mtime).isoformat()
+    body, prompt_n = render(records)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(header(meta, session_path, records, updated) + body,
+                        encoding="utf-8")
+    text = out_path.read_text(encoding="utf-8")
+    blocks, characters = thinking_stats(records)
+    print(f"  wrote {out_path.name}")
+    print(f"    {prompt_n} prompts, {len(text):,} chars, "
+          f"{len(text.splitlines()):,} lines, {out_path.stat().st_size / 1e6:.2f} MB")
+    print(f"    {blocks} thinking blocks, {characters} chars of thinking retained")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("keys", nargs="*", choices=list(SESSIONS) + [],
+                        help="which log(s) to rebuild (default: all)")
+    parser.add_argument("--list", action="store_true", help="show known logs and exit")
+    args = parser.parse_args(argv)
+
+    if args.list:
+        for key, meta in SESSIONS.items():
+            print(f"  {key:<20} {meta['filename']}")
+        return 0
+
+    for key in (args.keys or list(SESSIONS)):
+        build(key, SESSIONS[key])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

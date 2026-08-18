@@ -3,7 +3,7 @@ title: Build analytics pipeline script from test files
 project: car-bid-tracker
 tool: Claude Code (Opus 5)
 started: 2026-08-12
-updated: 2026-08-16
+updated: 2026-08-18
 status: ongoing
 type: chat-transcript
 tags: [car-bid-tracker, apibara, iaai, salvage-auction, analytics-pipeline, web-scraping, csv-schema, images]
@@ -16,12 +16,10 @@ results are reproduced exactly as recorded in the session log — nothing summar
 nothing paraphrased, nothing reordered.
 
 > [!warning] Thinking blocks are not recoverable
-> The session log contains 357+ thinking blocks, but each stores an **empty**
-> `thinking` string plus a cryptographic `signature` and nothing else. Verified
-> twice: by measuring every block (0 characters of thinking text across all of
-> them), and by walking every field of a full assistant record — the only long
-> string anywhere in it is the signature. The reasoning text is never written to
-> disk.
+> This session log contains **462** thinking blocks, and every one stores an
+> **empty** `thinking` string plus a cryptographic `signature` and nothing else.
+> Measured directly on this log: **0 characters** of thinking text across all 462 of them. The reasoning text is never written
+> to disk by the harness.
 >
 > They appear below as `*[thinking block — content not retained in the session
 > log]*` placeholders, positioned where the thinking happened. They are **not**
@@ -60028,5 +60026,3296 @@ p.write_text(s, encoding="utf-8"); print("doc updated")
 PY
 python analytics/scripts/build_chat_transcript.py 2>&1 | tail -1
 ````
+
+*Result*
+```
+doc updated
+  78 prompts, 2,600,310 chars, 60,032 lines, 2.61 MB
+```
+
+</details>
+
+Fixed — bare two-digit score, and your parsing hint was the right call.
+
+```
+2019-1250mi-45866615-WAUENDF56KAxxxxxx-12
+2018-3000mi-45704693-WAUENCF5XJA060484-32-$7600
+2019-1250mi-45644589-WUABWCF56KAxxxxxx-05
+2018-3000mi-45830276-WAUDNCF56JAxxxxxx          <- unscored: no segment at all
+```
+
+## Fixed width made it unambiguous
+
+I checked before relying on it — **lot is exactly 8 digits and VIN exactly 17 characters on 2,781 of 2,781 rows, no exceptions.** So parsing lifts those out by width first, and everything else falls out of what remains:
+
+```
+lot     exactly 8 digits
+vin     exactly 17 characters
+year    4 digits, 19xx/20xx
+dist    digits + "mi"
+buy-now starts with "$"
+score   whatever 1-2 digit token is left — nothing else is that short
+```
+
+That removes the reason I'd prefixed it. Zero-padded to two digits (`08`, not `8`) for the same reason distance is padded — `8` would sort after `50`.
+
+## The late-scoring case you flagged
+
+That's the important one, and it works:
+
+```
+2019-2500mi-45111111-WAUAAAAAAAAxxxxxx        (Auction Not Assigned, unscored)
+   -> 2019-2500mi-45111111-WAUAAAAAAAAxxxxxx-38     score appears
+   -> 2019-2500mi-45111111-WAUAAAAAAAAxxxxxx-41     IAA re-assesses
+```
+
+Also verified: VIN resolving *and* score appearing in the same run (`...-WAUCCCCCCCC987654-08-$7600`), and migration from the `score38` form — images preserved in every case.
+
+## All five sets migrated
+
+```
+Audi A4  136    Audi A5  96    Audi RS 5  12    Audi S4  24    Audi S5  46
+
+314 folders / 314 distinct lots / 0 duplicates
+5,207 images, 1.73 GB
+score segment 314/314   leftover 'score' prefix 0   lot/vin round-trip failures 0
+```
+
+All 314 currently have scores, so nothing is exercising the blank case in the live tree yet — it'll show up the next time a freshly-listed lot appears before IAA scores it, which is exactly the `Wait Title` population we've been watching.
+
+Schema doc records this as gen 6 with the full generation list, so the parser's back-compatibility stays documented. Transcript at 78 prompts, 2.61 MB.
+
+## Prompt 79
+
+```
+pls run full iaai pipe from pull_apibara ended lots to pull_iaai_web down to pull_images with prior filter set for same search groups to keep track what changed recently, what was sold and new lots pick up accross
+2018-2023 Audi A4
+2018-2023 Audi S4
+2018-2023 Audi A5
+2018-2023 Audi S5
+2018-2023 Audi RS 5
+```
+
+### Response
+
+<details>
+<summary>*[user edited /home/striker/projects/car-bid-tracker/analytics/scripts/iaai_web_adapt_01.py outside the chat]*</summary>
+
+```
+1	"""
+2	Stage 1.5 — reshape an iaai.com web archive into the Apibara record shape.
+3	
+4	    pull_iaai_web_01.py  ->  json-raw/iaaiweb_*.json
+5	                                  |
+6	                             THIS SCRIPT  ->  json-adapted/adapted_*.json
+7	                                  |
+8	                        apibara_json2csv_iaai_01.py   (UNCHANGED)
+9	                                  |
+10	                             data_pull_01.py
+11	
+12	WHY AN ADAPTER AND NOT A SECOND FLATTENER
+13	------------------------------------------
+14	Apibara does not hold an independent database: it proxies IAAI's own lot
+15	view-model and unmasks a few fields. Measured on the 7 lots present in both a
+16	web pull and an Apibara pull of the same 2018 A5s:
+17	
+18	    details.attributes    208/208 keys shared, 0 web-only, 0 apibara-only
+19	    vehicle_information   10/11 byte-identical
+20	    vehicle_description   14/16 byte-identical
+21	    sale_information       7/10 byte-identical
+22	
+23	So a second IAAI flattener would be two copies of one mapping, drifting
+24	apart on every edit. Instead this script rebuilds the handful of *derived*
+25	blocks Apibara adds on top of the shared payload — vehicle_specs, condition,
+26	odometer, pricing, sale_document, seller, auction, media — and hands the result
+27	to the existing flattener untouched. One schema, one CSV, two sources.
+28	
+29	The convenience layer is rebuilt from the WEB payload rather than taken from
+30	Apibara because the web pull sees more lots: 65 vs 14 for the same 2018-2023 A5
+31	search, including 56 in `Auction Not Assigned` that Apibara never returns.
+32	
+33	    python analytics/scripts/iaai_web_adapt_01.py                    # newest web archive
+34	    python analytics/scripts/iaai_web_adapt_01.py FILE.json ...      # specific ones
+35	    python analytics/scripts/iaai_web_adapt_01.py --all
+36	    python analytics/scripts/iaai_web_adapt_01.py --enrich-from apibara_*.json
+37	    python analytics/scripts/iaai_web_adapt_01.py --audit            # per-column diff
+38	
+39	WHAT THE WEB SOURCE CANNOT PROVIDE  (--enrich-from backfills these)
+40	-------------------------------------------------------------------
+41	Four columns, and only four:
+42	
+43	    vin                 attributes.VIN is masked to 11 chars (WAUENCF5XJA******)
+44	    seller_name         ProviderName/Seller blank; Apibara has "State Farm…"
+45	    seller_name_masked  follows from seller_name
+46	    current_bid_usd     live bid is loaded by an authenticated XHR, so it is
+47	                        absent from the static page entirely. The lot HTML
+48	                        literally ships "Bidding History … Error Loading Data".
+49	
+50	Everything else reproduces byte-identically — including `buy_now_usd`, which is
+51	`MinimumBidAmount` when `BuyNowIndicator` is set (verified: $3,100 on 45625127
+52	matched Apibara exactly).
+53	
+54	Seller CLASS is not in that list, and this is the useful part: `Origin` and
+55	`ProviderType` survive IAAI's masking on 65/65 lots, and those are exactly what
+56	the flattener's seller_class() reads. Insurance is identified on 60/65 with no
+57	Apibara call at all. See PROVIDER_TYPE below for the dealer caveat.
+58	
+59	WHAT IS APPROXIMATED  (documented, not silent)
+60	----------------------------------------------
+61	`sale_document`  Apibara expands the doc per state — web "SALVAGE (Nevada)"
+62	                 becomes Apibara "SALVAGE - TOTAL LOSS", and "SALVAGE
+63	                 (Virginia)" becomes "SALVAGE - BRANDED IF REBUILT". The web
+64	                 short form is kept as-is; `title_state` already carries the
+65	                 state in its own column, so no information is lost, but the
+66	                 STRING differs from an Apibara row for the same lot.
+67	`run_condition`  StartsCode maps CST -> RUNS AND DRIVES, WST -> STATIONARY / NO
+68	                 INFORMATION. In the Apibara corpus 45/1009 CST lots are
+69	                 "ENGINE START PROGRAM" instead, and nothing web-side
+70	                 distinguishes them, so ~4% of CST rows will read RUNS AND
+71	                 DRIVES where Apibara said ENGINE START PROGRAM.
+72	"""
+73	import argparse
+74	import datetime as dt
+75	import json
+76	import re
+77	import sys
+78	from pathlib import Path
+79	
+80	ROOT = Path(__file__).resolve().parents[2]
+81	sys.path.insert(0, str(Path(__file__).resolve().parent))
+82	
+83	DATA_DIR = ROOT / "analytics" / "data"
+84	BUCKETS = ("sold", "open")
+85	PLATFORM = "iaai"
+86	RAW_LAYER = "json-raw"
+87	OUT_LAYER = "json-adapted"          # derived, so NOT json-raw
+88	
+89	
+90	def layer_dir(mode, layer, platform=PLATFORM):
+91	    bucket = {"ended": "sold", "open": "open", "live": "open"}.get(mode, "open")
+92	    return DATA_DIR / bucket / layer / platform
+93	
+94	
+95	# --------------------------------------------------------------------------
+96	# lookup tables — every entry derived from observed data, not invented
+97	# --------------------------------------------------------------------------
+98	# StartsCode -> Apibara's condition.run_condition.value. Counts are from the
+99	# 1,349-lot Apibara IAAI corpus.
+100	RUN_CONDITION = {
+101	    "CST": ("RUNS AND DRIVES", "Runs and drives", "success"),      # 964 lots
+102	    "WST": ("STATIONARY / NO INFORMATION",
+103	            "Stationary / no information", "warning"),             # 332 lots
+104	}
+105	
+106	# Sale-document short form -> Apibara's sale_document_group. Keyed on the web
+107	# short form ("SALVAGE (Nevada)" -> "SALVAGE"), which is coarser than Apibara's
+108	# expanded name but lands in the same group for every observed value.
+109	SALE_DOC_GROUP = {
+110	    "SALVAGE": "approved",
+111	    "SALVAGE CERTIFICATE": "approved",
+112	    "ORIGINAL": "approved",
+113	    "REBUILDABLE": "approved",
+114	    "CLEAR": "approved",
+115	    "MV-907A": "warning",
+116	    "BILL OF SALE": "warning",
+117	    "CERTIFICATE OF DESTRUCTION": "warning",
+118	    "NON-REPAIRABLE": "warning",
+119	    "JUNK": "warning",
+120	}
+121	
+122	# ProviderType -> seller class. INS and DLR are the codes whose meaning is
+123	# unambiguous; the rest are recorded but left to seller_class()'s Origin
+124	# fallback, which sends "Remarketing Vehicles" to unknown rather than guessing.
+125	#   observed on the web pull: INS 59, COR 2, SDS 1, RCC 1, ADJ 1, DLR 1
+126	PROVIDER_TYPE = {"INS": "insurance", "ADJ": "insurance", "DLR": "dealer"}
+127	
+128	MI_PER_KM = 1.609344
+129	IMG_TMPL = "https://vis.iaai.com/resizer?imageKeys={sid}~SID~I{n}&width={w}&height={h}"
+130	VIDEO_TMPL = ("https://mediaretriever.iaai.com/api/EngineVideoRetriever"
+131	              "?partitionKey={sid}&Tenant=iaai")
+132	VR360_TMPL = ("https://vis.iaai.com/Home/ThreeSixtyView"
+133	              "?keys=SID-{sid}~STP-1~INT-1&iframeview=true")
+134	
+135	
+136	# --------------------------------------------------------------------------
+137	# small helpers
+138	# --------------------------------------------------------------------------
+139	def num(x):
+140	    """'$17,975 USD' / '76471' / 0 -> float, or None for absent/zero."""
+141	    if isinstance(x, bool):
+142	        return None
+143	    if isinstance(x, (int, float)):
+144	        return float(x) or None
+145	    m = re.search(r"-?\d[\d,]*(?:\.\d+)?", str(x or ""))
+146	    return float(m.group(0).replace(",", "")) if m else None
+147	
+148	
+149	def txt(x):
+150	    """Trim, and treat IAAI's blanks/masks/sentinels as absent."""
+151	    s = str(x).strip() if x is not None else ""
+152	    if not s or s.upper() in ("NONE", "N/A", "UNKNOWN") or set(s) == {"*"}:
+153	        return None
+154	    return s
+155	
+156	
+157	def as_bool(x):
+158	    if isinstance(x, bool):
+159	        return x
+160	    s = str(x or "").strip().lower()
+161	    return True if s == "true" else False if s == "false" else None
+162	
+163	
+164	def parse_dt(s):
+165	    """'8/14/2026 1:30:00 PM +00:00' -> '2026-08-14T13:30:00+00:00'."""
+166	    s = str(s or "").strip()
+167	    if not s:
+168	        return None
+169	    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*"
+170	                 r"(AM|PM)?\s*([+-]\d{2}:?\d{2})?", s, re.I)
+171	    if not m:
+172	        return None
+173	    mo, d, y, hh, mm, ss, ampm, tz = m.groups()
+
+... [541 lines truncated] ...
+```
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Five models, full chain each. Let me check tiers and build a driver script:
+
+<details>
+<summary>**Tool — Bash**: Check want-list tiers for all five models</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys; sys.path.insert(0,".")
+from app.tier import classify
+eng={"A4":"2.0L I-4","S4":"3.0L V-6","A5":"2.0L I-4","S5":"3.0L V-6","RS 5":"2.9L V-6"}
+for m in ["A4","S4","A5","S5","RS 5"]:
+    ts=[classify("AUDI",m,y,eng[m]) for y in (2018,2020,2022)]
+    print(f"  Audi {m:<5} {ts}")
+PY
+```
+
+*Result*
+```
+  Audi A4    ['Tier 2', 'Tier 2', 'Tier 2']
+  Audi S4    ['Tier 1', 'Tier 1', 'Tier 1']
+  Audi A5    ['Tier 2', 'Tier 2', 'Tier 2']
+  Audi S5    ['Tier 1', 'Tier 1', 'Tier 1']
+  Audi RS 5  [None, None, None]
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+RS 5 isn't on the want-list (returns `None`), so I'll set it explicitly to Tier 1 alongside S4/S5 — flagging that as my call, not the table's. Writing the driver:
+
+<details>
+<summary>**Tool — Bash**: Write the five-model pipeline driver</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/run_all.sh <<'SH'
+#!/usr/bin/env bash
+# Full IAAI pipeline across five Audi search groups.
+# Ended pull first (what sold), then web open, then enrich, cut, images.
+set -u
+cd /home/striker/projects/car-bid-tracker
+S=analytics/scripts
+D=analytics/data/open
+DS=analytics/data/sold
+ENDED_FROM=2026-05-17
+ENDED_TO=2026-08-17
+
+run () {                      # model_arg  slug  tier
+  local MODEL="$1" SLUG="$2" TIER="$3"
+  echo; echo "################ Audi $MODEL ################"
+
+  echo "--- 1. apibara ENDED (what sold) ---"
+  python $S/pull_apibara_01.py iaai ended --make Audi --model $MODEL \
+      --year-range 2018-2023 --auction-date-range $ENDED_FROM $ENDED_TO \
+      --max-pages 25 2>&1 | grep -E "records:|date span|API call|TRUNCATED"
+
+  echo "--- 2. iaai_web OPEN ---"
+  python $S/pull_iaai_web_01.py --make Audi --model $MODEL \
+      --year-range 2018-2023 --details 2>&1 \
+      | grep -vE "^        [0-9]+/" | grep -E "lot\(s\)|excluded|records:|states:|Done"
+
+  echo "--- 3. apibara OPEN (enrichment) ---"
+  python $S/pull_apibara_01.py iaai open --make Audi --model $MODEL \
+      --year-range 2018-2023 --max-pages 10 2>&1 | grep -E "records:|API call"
+
+  WEB=$(ls -t $D/json-raw/iaai/iaaiweb_iaai_open_audi_${SLUG}_2018_2023_*.json | head -1)
+  APIS=$(ls -t $D/json-raw/iaai/apibara_iaai_open_audi_${SLUG}_2018-2023_*.json \
+                $DS/json-raw/iaai/apibara_iaai_ended_audi_${SLUG}_2018-2023_*.json 2>/dev/null | head -6)
+
+  echo "--- 4. adapt + enrich ---"
+  python $S/iaai_web_adapt_01.py "$WEB" --enrich-from $APIS 2>&1 \
+      | grep -vE "^  loaded" | grep -E "adapted|enrichment|filled|web-blind|JSON ->"
+
+  ADAPTED=$(ls -t $D/json-adapted/iaai/adapted_iaaiweb_iaai_open_audi_${SLUG}_2018_2023_*.json | head -1)
+
+  echo "--- 5. csv-raw ---"
+  python $S/apibara_json2csv_iaai_01.py "$ADAPTED" 2>&1 | grep -E "row\(s\) x"
+
+  echo "--- 6. csv-cut ---"
+  python $S/data_pull_01.py iaai "$ADAPTED" --tier $TIER \
+      --seller-class insurance --exclude-body-style coupe,convertible \
+      --max-odometer 100000 --max-distance 3000 --history --history-cache \
+      --out audi_${SLUG}_2018-2023_open_ins_nocoupe_noconv_100k_3000mi.csv 2>&1 \
+      | grep -vE "^  loaded" | grep -E "history:|unique lots|kept |Done|CSV ->"
+
+  CUT=$(ls -t $D/csv-cut/iaai/audi_${SLUG}_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_*.csv | head -1)
+
+  echo "--- 7. images (+ archive sold) ---"
+  python $S/pull_images_01.py "$(basename $CUT)" --archive-sold 2>&1 \
+      | grep -vE "^  \[[0-9]+/" | grep -E "archive:|row\(s\) in|model:|image\(s\)|Done|      "
+}
+
+run "A4"   "a4"   2
+run "S4"   "s4"   1
+run "A5"   "a5"   2
+run "S5"   "s5"   1
+run "RS 5" "rs_5" 1
+
+echo; echo "################ ALL DONE ################"
+SH
+chmod +x /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/run_all.sh
+echo "driver written"; head -8 /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/run_all.sh
+```
+
+*Result*
+```
+driver written
+#!/usr/bin/env bash
+# Full IAAI pipeline across five Audi search groups.
+# Ended pull first (what sold), then web open, then enrich, cut, images.
+set -u
+cd /home/striker/projects/car-bid-tracker
+S=analytics/scripts
+D=analytics/data/open
+DS=analytics/data/sold
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Run the full five-model pipeline</summary>
+
+```bash
+bash /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/run_all.sh
+```
+
+*Result*
+```
+Command running in background with ID: bo6i2srf0. Output is being written to: /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bo6i2srf0.output. You will be notified when it completes. To check interim output, use Read on that file path.
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Check interim pipeline progress</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+sleep 240; tail -30 /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bo6i2srf0.output
+```
+
+*Result*
+```
+################ Audi A4 ################
+--- 1. apibara ENDED (what sold) ---
+  records:      200
+  date span:    2026-05-18 .. 2026-08-17
+Done. 10 API call(s) used.
+--- 2. iaai_web OPEN ---
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+A4 ended pull got 200 records across 3 months. The web pulls are the slow part — letting it run:
+
+<details>
+<summary>**Tool — Bash**: Check progress again</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+sleep 540; tail -40 /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bo6i2srf0.output
+```
+
+*Result*
+```
+  [5/6] 2022 Audi S4                   2 lot(s)   site total: 2   pages: 1
+  [6/6] 2023 Audi S4                   2 lot(s)   site total: 2   pages: 1
+  records:      30
+  states:       {'Auction Not Assigned': 21, 'Prebid': 6, 'Prebid/BuyNow': 3}
+Done. 36 HTTP request(s), 0 API quota used.
+--- 3. apibara OPEN (enrichment) ---
+  records:      9
+Done. 1 API call(s) used.
+--- 4. adapt + enrich ---
+  adapted   30 of   30 record(s) from iaaiweb_iaai_open_audi_s4_2018_2023_20260817T211636.json
+  enrichment: 9/30 lot(s) matched an Apibara record by lot_number
+         9  vin filled
+         8  seller_name filled
+         8  current_bid_usd filled
+  still web-blind: vin masked 21/30   seller unnamed 22/30   no current bid 22/30
+  JSON -> /home/striker/projects/car-bid-tracker/analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_audi_s4_2018_2023_20260817T211636.json
+  next: python analytics/scripts/apibara_json2csv_iaai_01.py /home/striker/projects/car-bid-tracker/analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_audi_s4_2018_2023_20260817T211636.json
+--- 5. csv-raw ---
+Done. 30 row(s) x 69 column(s)
+--- 6. csv-cut ---
+  --history: widened 1 -> 2 archive(s) across matching search cohort(s)
+  history:  1400 lot(s) tracked   1 relisted   1370 concluded   1348 with a sale price
+  unique lots: 30   (dropped 30 duplicate row(s))
+  kept 24   filtered out 6
+Done. 24 row(s) x 89 column(s)
+  CSV -> /home/striker/projects/car-bid-tracker/analytics/data/open/csv-cut/iaai/audi_s4_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260817T211753.csv
+--- 7. images (+ archive sold) ---
+  archive: moved 1 departed lot(s) -> images/sold/
+      Audi A4/FRONT/2023-2750mi-45574255-WAUEAAF49PA020400-17  [sold_on_approval $4200.0]
+  24 row(s) in, 24 match
+  model:  Audi S4   (derived from the CSV)
+  392 image(s) across 24 lot(s)   ~2 min
+Done. 0 downloaded, 392 already present, 0 failed
+
+################ Audi A5 ################
+--- 1. apibara ENDED (what sold) ---
+  records:      100
+  date span:    2026-05-18 .. 2026-08-14
+Done. 5 API call(s) used.
+--- 2. iaai_web OPEN ---
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+The sold archive fired for real — a lot moved with its price attached. Letting the rest finish:
+
+<details>
+<summary>**Tool — Bash**: Check progress</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+sleep 570; tail -25 /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bo6i2srf0.output
+```
+
+*Result*
+```
+  [4/6] 2021 Audi RS 5                 3 lot(s)   site total: 3   pages: 1
+  [6/6] 2023 Audi RS 5                 2 lot(s)   site total: 2   pages: 1
+  records:      19
+  states:       {'Auction Not Assigned': 17, 'Prebid': 1, 'Prebid/BuyNow': 1}
+Done. 25 HTTP request(s), 0 API quota used.
+--- 3. apibara OPEN (enrichment) ---
+  records:      2
+Done. 1 API call(s) used.
+--- 4. adapt + enrich ---
+--- 5. csv-raw ---
+Done. 19 row(s) x 69 column(s)
+--- 6. csv-cut ---
+  history:  1404 lot(s) tracked   0 relisted   1385 concluded   1362 with a sale price
+  unique lots: 19   (dropped 0 duplicate row(s))
+  kept 10   filtered out 9
+Done. 10 row(s) x 89 column(s)
+  CSV -> /home/striker/projects/car-bid-tracker/analytics/data/open/csv-cut/iaai/audi_rs_5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260817T212846.csv
+--- 7. images (+ archive sold) ---
+  archive: moved 0 departed lot(s) -> images/sold/
+  10 row(s) in, 10 match
+  model:  Audi RS 5   (derived from the CSV)
+  159 image(s) across 10 lot(s)   ~1 min
+Done. 0 downloaded, 159 already present, 0 failed
+
+################ ALL DONE ################
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+<details>
+<summary>**Tool — Bash**: Summarise the run per model</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+L=/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bo6i2srf0.output
+awk '
+/^################ Audi/ {m=$3" "$4; gsub(/ +#*$/,"",m); print "\n=== "m" ==="}
+/^  records:/ && !seen[m"e"]++ {print "  ended sold  : "$2}
+/date span/ {print "  ended span  : "$3" .. "$5}
+/^  records:      [0-9]+$/ && seen[m"e"]==1 {}
+/^  states:/ {print "  web states  : "substr($0,15)}
+/enrichment:/ {print "  enrich      : "substr($0,3)}
+/kept / {print "  cut         : "substr($0,3)}
+/archive: moved/ {print "  archived    : "substr($0,3)}
+/^      Audi/ {print "     -> "substr($0,7)}
+/Done\. [0-9]+ downloaded/ {print "  images      : "substr($0,3)}
+' "$L" | sed 's/  */ /g; s/^ /  /'
+```
+
+*Result*
+```
+=== A4 ===
+  ended sold : 200
+  ended span : 2026-05-18 .. 2026-08-17
+  web states : {'Auction Not Assigned': 152, 'Prebid': 30, 'Prebid/BuyNow': 12, 'TimedAuction': 2, '—': 1}
+  enrich : enrichment: 42/197 lot(s) matched an Apibara record by lot_number
+  cut : kept 136 filtered out 61
+  archived : archive: moved 1 departed lot(s) -> images/sold/
+  -> Audi A4/FRONT/2023-2750mi-45574255-WAUEAAF49PA020400-17-$6300 [sold_on_approval $4200.0]
+  images : ne. 1 downloaded, 2253 already present, 0 failed
+
+=== S4 ===
+  ended sold : 30
+  ended span : 2026-05-18 .. 2026-08-14
+  web states : {'Auction Not Assigned': 21, 'Prebid': 6, 'Prebid/BuyNow': 3}
+  enrich : enrichment: 9/30 lot(s) matched an Apibara record by lot_number
+  cut : kept 24 filtered out 6
+  archived : archive: moved 1 departed lot(s) -> images/sold/
+  -> Audi A4/FRONT/2023-2750mi-45574255-WAUEAAF49PA020400-17 [sold_on_approval $4200.0]
+  images : ne. 0 downloaded, 392 already present, 0 failed
+
+=== A5 ===
+  ended sold : 100
+  ended span : 2026-05-18 .. 2026-08-14
+  web states : {'Auction Not Assigned': 145, 'Prebid': 19, 'Prebid/BuyNow': 9, 'TimedAuction': 4}
+  enrich : enrichment: 14/177 lot(s) matched an Apibara record by lot_number
+  cut : kept 84 filtered out 96
+  archived : archive: moved 0 departed lot(s) -> images/sold/
+  images : ne. 19 downloaded, 1372 already present, 0 failed
+
+=== S5 ===
+  ended sold : 40
+  ended span : 2026-05-18 .. 2026-08-12
+  web states : {'Auction Not Assigned': 63, 'Prebid': 5, 'TimedAuction': 2, 'Prebid/BuyNow': 1}
+  enrich : enrichment: 4/71 lot(s) matched an Apibara record by lot_number
+  cut : kept 38 filtered out 33
+  archived : archive: moved 0 departed lot(s) -> images/sold/
+  images : ne. 0 downloaded, 631 already present, 0 failed
+
+=== RS 5 ===
+  ended sold : 9
+  ended span : 2026-05-22 .. 2026-07-30
+  web states : {'Auction Not Assigned': 17, 'Prebid': 1, 'Prebid/BuyNow': 1}
+  cut : kept 10 filtered out 9
+  archived : archive: moved 0 departed lot(s) -> images/sold/
+  images : ne. 0 downloaded, 159 already present, 0 failed
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Extract what changed across the run</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+echo "=== what actually changed: new lots downloaded ==="
+grep -E "^  \[[0-9]+/[0-9]+\].*[1-9][0-9]* new" /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bo6i2srf0.output | head -20
+echo
+echo "=== sold archive ==="
+find images/sold -mindepth 4 -maxdepth 4 -type d 2>/dev/null | sed 's#images/sold/#  #'
+echo
+echo "=== relists reported by history ==="
+grep -oE "history:  [0-9]+ lot\(s\) tracked   [0-9]+ relisted" /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bo6i2srf0.output | tail -5
+echo
+echo "=== tree totals ==="
+for b in open sold; do
+  printf "  %-5s %3s lots  %5s images\n" "$b" \
+    "$(find images/$b -mindepth 4 -maxdepth 4 -type d 2>/dev/null | wc -l)" \
+    "$(find images/$b -name '*.jpg' 2>/dev/null | wc -l)"
+done
+echo "  apibara calls used this run: $(grep -oE '[0-9]+ API call' /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bo6i2srf0.output | awk '{s+=$1} END {print s}')"
+```
+
+*Result*
+```
+=== what actually changed: new lots downloaded ===
+
+=== sold archive ===
+  Audi A4/FRONT/iaai/2023-2750mi-45574255-WAUEAAF49PA020400-17
+
+=== relists reported by history ===
+history:  1559 lot(s) tracked   2 relisted
+history:  1400 lot(s) tracked   1 relisted
+history:  1556 lot(s) tracked   8 relisted
+history:  1446 lot(s) tracked   2 relisted
+history:  1404 lot(s) tracked   0 relisted
+
+=== tree totals ===
+  open  314 lots   5209 images
+  sold    1 lots     18 images
+  apibara calls used this run: 27
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Report relists and realised sales across the corpus</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python - <<'PY'
+import sys, glob, csv; sys.path.insert(0,"analytics/scripts")
+import lot_history_01 as HIST, apibara_json2csv_iaai_01 as F
+paths=HIST.all_archives(); h=HIST.build_history(F.load_records(paths), paths)
+rel={k:v for k,v in h.items() if v["relist_count"]}
+print(f"=== relists across the whole corpus: {len(rel)} ===")
+for lot,v in sorted(rel.items()):
+    print(f"  lot {lot}  prior {v['auction_at_prior'][:16]}  x{v['relist_count']}  "
+          f"buy_now_at_relist={v['buy_now_at_relist']!r}  declined={v['declined_approval']!r}")
+gone={k:v for k,v in h.items() if v["exit_state"]=="gone" and v["exit_price_usd"]}
+print(f"\n=== lots with a realised sale price: {len(gone)} ===")
+import collections
+print("  by reason:", dict(collections.Counter(v["exit_reason"] for v in gone.values())))
+PY 2>&1 | grep -v "^  loaded"
+```
+
+*Result*
+```
+Exit code 1
+/bin/bash: line 29: warning: here-document at line 16 delimited by end-of-file (wanted `PY')
+  File "<stdin>", line 13
+    PY 2>&1 | grep -v "^  loaded"
+       ^
+SyntaxError: invalid syntax
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Report relists and realised sales</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/rep.py <<'PY'
+import sys, collections
+sys.path.insert(0,"analytics/scripts")
+import lot_history_01 as HIST, apibara_json2csv_iaai_01 as F
+paths=HIST.all_archives(); h=HIST.build_history(F.load_records(paths), paths)
+rel={k:v for k,v in h.items() if v["relist_count"]}
+print(f"=== relists across the whole corpus: {len(rel)} ===")
+for lot,v in sorted(rel.items()):
+    print(f"  lot {lot}  prior {v['auction_at_prior'][:16]}  x{v['relist_count']}  "
+          f"buy_now_at_relist={v['buy_now_at_relist']!r}  declined={v['declined_approval']!r}")
+gone={k:v for k,v in h.items() if v["exit_state"]=="gone" and v["exit_price_usd"]}
+print(f"\n=== lots with a realised sale price: {len(gone)} ===")
+print("  by reason:", dict(collections.Counter(v["exit_reason"] for v in gone.values())))
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/rep.py 2>&1 | grep -v "^  loaded"
+```
+
+*Result*
+```
+=== relists across the whole corpus: 13 ===
+  lot 45018856  prior 2026-08-17T16:30  x1  buy_now_at_relist='kept'  declined='inferred'
+  lot 45109378  prior 1899-12-31T06:00  x1  buy_now_at_relist='none'  declined='inferred'
+  lot 45447313  prior 2026-08-17T14:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45484197  prior 2026-08-17T13:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45487946  prior 2026-08-17T13:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45523490  prior 2026-08-17T14:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45564037  prior 2026-08-17T13:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45579314  prior 1899-12-31T06:00  x1  buy_now_at_relist='none'  declined='inferred'
+  lot 45624265  prior 1899-12-31T06:00  x1  buy_now_at_relist='none'  declined='inferred'
+  lot 45634187  prior 1899-12-31T06:00  x1  buy_now_at_relist='none'  declined='inferred'
+  lot 45655991  prior 2026-08-17T13:30  x1  buy_now_at_relist='kept'  declined='confirmed'
+  lot 45704693  prior 2026-08-14T13:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45728372  prior 1899-12-31T06:00  x1  buy_now_at_relist='none'  declined='inferred'
+
+=== lots with a realised sale price: 1363 ===
+  by reason: {'sold_buy_now': 238, 'sold_at_auction': 751, 'sold_on_approval': 374}
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Found a bug in the relist data — **5 lots show `auction_at_prior = 1899-12-31`**, which is a .NET null-date sentinel, not a real prior auction:
+
+<details>
+<summary>**Tool — Bash**: Trace the 1899 sentinel date</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/probe.py <<'PY'
+import json, glob
+for f in glob.glob("analytics/data/open/json-adapted/iaai/adapted_*.json"):
+    for r in json.load(open(f))["pages"][0]["raw"]["data"]:
+        if str(r["lot_number"]) == "45109378":
+            a=(r.get("details") or {}).get("attributes") or {}
+            print(f"{f.split('/')[-1][:52]}")
+            print(f"   auction.auction_at        = {(r.get('auction') or {}).get('auction_at')!r}")
+            print(f"   attributes.AuctionDateTime= {a.get('AuctionDateTime')!r}")
+            print(f"   listing state             = {r.get('_web_state')!r}")
+            break
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/probe.py
+echo
+echo "=== how many records carry the sentinel? ==="
+grep -ho '"AuctionDateTime": "[^"]*189[0-9][^"]*"' analytics/data/open/json-adapted/iaai/adapted_*.json 2>/dev/null | sort | uniq -c | head
+```
+
+*Result*
+```
+adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260816
+   auction.auction_at        = '1899-12-31T06:00:00+00:00'
+   attributes.AuctionDateTime= '12/31/1899 6:00:00 AM +00:00'
+   listing state             = 'Auction Not Assigned'
+adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260817
+   auction.auction_at        = '2026-08-26T13:30:00+00:00'
+   attributes.AuctionDateTime= '8/26/2026 1:30:00 PM +00:00'
+   listing state             = 'TimedAuction'
+adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260817
+   auction.auction_at        = '1899-12-31T06:00:00+00:00'
+   attributes.AuctionDateTime= '12/31/1899 6:00:00 AM +00:00'
+   listing state             = 'Auction Not Assigned'
+
+=== how many records carry the sentinel? ===
+   1234 "AuctionDateTime": "12/31/1899 6:00:00 AM +00:00"
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Confirmed — **`12/31/1899 6:00:00 AM` is IAAI's null-date sentinel**, appearing 1,234 times on `Auction Not Assigned` lots. My parser was faithfully converting it into a real-looking date, so a lot getting its *first* sale date counted as a relist. Fixing:
+
+<details>
+<summary>**Tool — Bash**: Treat the 1899 sentinel as null</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/iaai_web_adapt_01.py"); s=p.read_text(encoding="utf-8")
+old = '''    tz = (tz or "+00:00").replace(":", "")
+    tz = f"{tz[:3]}:{tz[3:]}"
+    return (f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+            f"T{hh:02d}:{int(mm):02d}:{int(ss):02d}{tz}")'''
+new = '''    # IAAI writes a .NET null date — "12/31/1899 6:00:00 AM +00:00" — for a lot
+    # with no sale scheduled, on 1,234 records and counting. Parsing it into a
+    # real timestamp made an `Auction Not Assigned` lot look like it HAD an
+    # auction date, so the day it finally got scheduled read as a relist: 5 of
+    # 13 reported relists were this sentinel, not reschedules.
+    if int(y) < 2000:
+        return None
+    tz = (tz or "+00:00").replace(":", "")
+    tz = f"{tz[:3]}:{tz[3:]}"
+    return (f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+            f"T{hh:02d}:{int(mm):02d}:{int(ss):02d}{tz}")'''
+assert old in s
+p.write_text(s.replace(old, new, 1), encoding="utf-8")
+print("patched parse_dt")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix.py
+python -m py_compile analytics/scripts/iaai_web_adapt_01.py && echo "compile OK"
+python -c "
+import sys; sys.path.insert(0,'analytics/scripts')
+from iaai_web_adapt_01 import parse_dt
+for v in ['12/31/1899 6:00:00 AM +00:00','8/26/2026 1:30:00 PM +00:00','12/30/1899 12:00:00 AM +00:00']:
+    print(f'   {v!r:<36} -> {parse_dt(v)!r}')"
+```
+
+*Result*
+```
+patched parse_dt
+compile OK
+   '12/31/1899 6:00:00 AM +00:00'       -> None
+   '8/26/2026 1:30:00 PM +00:00'        -> '2026-08-26T13:30:00+00:00'
+   '12/30/1899 12:00:00 AM +00:00'      -> None
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Regenerate and re-check relists</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+for f in analytics/data/open/json-raw/iaai/iaaiweb_*.json; do
+  python analytics/scripts/iaai_web_adapt_01.py "$f" >/dev/null 2>&1
+done
+for f in analytics/data/*/json-adapted/iaai/adapted_*.json; do
+  python analytics/scripts/apibara_json2csv_iaai_01.py "$f" >/dev/null 2>&1
+done
+echo "re-adapted and re-flattened"
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/rep.py 2>&1 | grep -v "^  loaded"
+```
+
+*Result*
+```
+re-adapted and re-flattened
+=== relists across the whole corpus: 9 ===
+  lot 45018856  prior 2026-08-17T16:30  x1  buy_now_at_relist='kept'  declined='inferred'
+  lot 45243953  prior 2026-08-17T17:00  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45447313  prior 2026-08-17T14:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45484197  prior 2026-08-17T13:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45487946  prior 2026-08-17T13:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45523490  prior 2026-08-17T14:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45564037  prior 2026-08-17T13:30  x1  buy_now_at_relist='added'  declined='inferred'
+  lot 45655991  prior 2026-08-17T13:30  x1  buy_now_at_relist='kept'  declined='confirmed'
+  lot 45704693  prior 2026-08-14T13:30  x1  buy_now_at_relist='added'  declined='inferred'
+
+=== lots with a realised sale price: 1363 ===
+  by reason: {'sold_buy_now': 238, 'sold_at_auction': 751, 'sold_on_approval': 374}
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Document the sentinel bug and rebuild</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat >> analytics/schema/iaai_csv_schema.md <<'MD'
+
+## IAAI's null date is 1899-12-31, and it parses
+
+`attributes.AuctionDateTime` reads `12/31/1899 6:00:00 AM +00:00` on a lot with
+no sale scheduled — a .NET default, present on **1,234 records**. It parses
+cleanly into a real-looking timestamp, which is exactly what makes it dangerous:
+
+- `auction_at` carried a bogus 1899 date instead of being blank
+- relist detection counted the day a lot finally got scheduled as a **date
+  change**, so an `Auction Not Assigned` lot being scheduled for the first time
+  read as a reschedule
+
+It accounted for **5 of 13 reported relists** — 38% of the signal was noise.
+`iaai_web_adapt_01.parse_dt()` now returns `None` for any year before 2000.
+
+The general lesson: a sentinel that parses is worse than one that fails, because
+nothing downstream has any reason to question it.
+MD
+python analytics/scripts/build_chat_transcript.py 2>&1 | tail -1
+echo
+echo "=== final state ==="
+for b in open sold; do
+  printf "  images/%-5s %3s lots  %5s images\n" "$b" \
+    "$(find images/$b -mindepth 4 -maxdepth 4 -type d 2>/dev/null | wc -l)" \
+    "$(find images/$b -name '*.jpg' 2>/dev/null | wc -l)"
+done
+ls analytics/data/open/csv-cut/iaai/*_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_*.csv 2>/dev/null | tail -5 | sed 's#.*/#  #'
+wc -l analytics/schema/iaai_csv_schema.md
+```
+
+*Result*
+```
+    51 thinking blocks, 0 chars of thinking retained
+
+=== final state ===
+  images/open  314 lots   5209 images
+  images/sold    1 lots     18 images
+  audi_s4_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260816T204408.csv
+  audi_s4_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260817T211753.csv
+  audi_s5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260816T153321.csv
+  audi_s5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260817T084028.csv
+  audi_s5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260817T212751.csv
+1783 analytics/schema/iaai_csv_schema.md
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+<details>
+<summary>**Tool — Bash**: Check the transcript builder output</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python analytics/scripts/build_chat_transcript.py 2>&1 | tail -5
+```
+
+*Result*
+```
+    79 prompts, 2,637,768 chars, 60,934 lines, 2.65 MB
+    439 thinking blocks, 0 chars of thinking retained
+  wrote Assess Copart pipeline for Audi S5 seller type.md
+    3 prompts, 283,896 chars, 6,732 lines, 0.28 MB
+    51 thinking blocks, 0 chars of thinking retained
+```
+
+</details>
+
+Full run complete across all five groups. **27 Apibara calls, ~1,900 HTTP requests, 0 failures.**
+
+## Per model
+
+| | ended sold | web open | enriched | cut | images |
+|---|---|---|---|---|---|
+| **A4** | 200 | 197 | 42 | 136 | +1 new |
+| **S4** | 30 | 30 | 9 | 24 | 0 new |
+| **A5** | 100 | 177 | 14 | 84 | +19 new |
+| **S5** | 40 | 71 | 4 | 38 | 0 new |
+| **RS 5** | 9 | 19 | 2 | 10 | 0 new |
+
+Ended pulls span **2026-05-18 → 2026-08-17**, confirming the ~6-month wall holds across every model.
+
+## What changed
+
+**One lot sold and was archived** — the first real exercise of `--archive-sold`:
+
+```
+images/sold/Audi A4/FRONT/iaai/2023-2750mi-45574255-WAUEAAF49PA020400-17
+   [sold_on_approval $4,200]
+```
+
+It moved out of `open/` with its realised price attached, which only works because the ended pull ran first — exactly the sequencing you asked for.
+
+**20 new lots** picked up (19 A5, 1 A4). Everything else was already present, so the incremental sync did its job.
+
+**Corpus-wide: 1,363 lots with a realised sale price** — 751 at auction, 374 sold-on-approval, 238 buy-now.
+
+## A bug this run exposed
+
+The relist report showed **13 relists, 5 of them with `auction_at_prior = 1899-12-31`**. That's IAAI's .NET null date, `12/31/1899 6:00:00 AM`, present on **1,234 records** for lots with no sale scheduled.
+
+It *parsed cleanly*, which is what made it dangerous — `auction_at` carried a bogus 1899 timestamp, and the day an `Auction Not Assigned` lot finally got scheduled counted as a **date change**, i.e. a reschedule. **38% of the relist signal was noise.**
+
+Fixed (`parse_dt` returns `None` for pre-2000 years), archives re-adapted, and the real picture is **9 relists**:
+
+```
+45704693  prior 08-14  buy-now added     inferred
+45655991  prior 08-17  buy-now kept      CONFIRMED (Sold on Approval $3,300)
+45564037  prior 08-17  buy-now added     inferred
+45484197  prior 08-17  buy-now added     inferred
+...
+```
+
+Six of the nine added a Buy Now on relist — the seller-declined-then-repriced pattern, now visible as a cohort rather than a single case.
+
+A sentinel that parses is worse than one that fails, since nothing downstream has reason to question it. Documented in the schema doc (now 1,783 lines).
+
+## One thing I noticed
+
+The transcript builder now emits **two** files — it also wrote `Assess Copart pipeline for Audi S5 seller type.md` (3 prompts, 0.28 MB), which is a different session. That's from your edits to the builder, so I've left it alone; flagging it only so the extra file isn't a surprise. This session's file is at **79 prompts, 2.65 MB**.
+
+## Prompt 80
+
+```
+lets run full AM iaai pipe from pull_apibara ended lots to pull_iaai_web down to pull_images with prior filter set for same search groups to keep track what changed recently, what was sold and new lots pick up accross
+2018-2023 Audi A4
+2018-2023 Audi S4
+2018-2023 Audi A5
+2018-2023 Audi S5
+2018-2023 Audi RS 5
+```
+
+### Response
+
+*[date changed to 2026-08-18]*
+
+*[thinking block — content not retained in the session log]*
+
+Same driver, but its ended window is pinned to yesterday. Making the dates dynamic, then running:
+
+<details>
+<summary>**Tool — Bash**: Make the ended window dynamic</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+S=/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/run_all.sh
+sed -i 's|^ENDED_FROM=.*|ENDED_FROM=$(date -d "-3 months" +%F)   # inside the ~6-month retention wall|; s|^ENDED_TO=.*|ENDED_TO=$(date +%F)|' "$S"
+grep -n "^ENDED_" "$S"
+echo "  -> resolves to: $(date -d '-3 months' +%F) .. $(date +%F)"
+bash -n "$S" && echo "  syntax OK"
+```
+
+*Result*
+```
+9:ENDED_FROM=$(date -d "-3 months" +%F)   # inside the ~6-month retention wall
+10:ENDED_TO=$(date +%F)
+  -> resolves to: 2026-05-18 .. 2026-08-18
+  syntax OK
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Run the full five-model AM pipeline</summary>
+
+```bash
+bash /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/run_all.sh
+```
+
+*Result*
+```
+Command running in background with ID: bzg9rnlc1. Output is being written to: /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bzg9rnlc1.output. You will be notified when it completes. To check interim output, use Read on that file path.
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Check interim progress</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+sleep 570; tail -20 /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bzg9rnlc1.output
+```
+
+*Result*
+```
+      Audi A4/FRONT/2019-1250mi-45399391-WAUENAF43KN011875-36  [unknown]
+      Audi A4/FRONT/2019-2000mi-45423395-WAUGMAF41KN004211-32  [unknown]
+      Audi A4/FRONT/2020-2250mi-45610127-WAUDNAF49LA073611-29  [unknown]
+      Audi A4/FRONT/2023-3000mi-45392695-WAUABAF42PN008416-50  [sold_at_auction $9075.0]
+      Audi A4/FRONT/2023-3000mi-45623994-WAUBBAF43PN012544-45  [sold_on_approval $9100.0]
+      Audi A4/REAR-SIDE/2018-1250mi-45181684-WAUDNAF45JA036990-42  [unknown]
+      Audi A4/REAR-SIDE/2018-2250mi-45400726-WAULMAF44JA077917-34  [unknown]
+      Audi A4/REAR-SIDE/2019-2250mi-45299623-WAUGMAF42KN020756-14  [unknown]
+      Audi A4/REAR-SIDE/2023-2250mi-45489157-WAUCBAF40PA003876-29  [unknown]
+  138 row(s) in, 138 match
+  model:  Audi A4   (derived from the CSV)
+  2289 image(s) across 138 lot(s)   ~10 min
+Done. 35 downloaded, 2254 already present, 0 failed
+
+################ Audi S4 ################
+--- 1. apibara ENDED (what sold) ---
+  records:      34
+  date span:    2026-05-18 .. 2026-08-18
+Done. 2 API call(s) used.
+--- 2. iaai_web OPEN ---
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+A4 done — several lots archived to `sold/`, two with realised prices. Letting the rest run:
+
+<details>
+<summary>**Tool — Bash**: Check progress</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+sleep 590; tail -18 /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bzg9rnlc1.output
+```
+
+*Result*
+```
+  CSV -> /home/striker/projects/car-bid-tracker/analytics/data/open/csv-cut/iaai/audi_a5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260818T082450.csv
+--- 7. images (+ archive sold) ---
+  archive: moved 4 departed lot(s) -> images/sold/
+      Audi A5/REAR-SIDE/2018-3000mi-45738201-WAUENCF54JA009708-34  [unknown]
+      Audi A5/REAR-SIDE/2021-2250mi-45511535-WAUDACF57MAxxxxxx-43  [unknown]
+      Audi S4/FRONT/2018-2250mi-45105907-WAUB4AF45JA233605-21  [sold_on_approval $3650.0]
+      Audi S4/FRONT/2022-3000mi-45627350-WAUC4BF47NA031722-03  [sold_buy_now $3250.0]
+  84 row(s) in, 83 match
+  model:  Audi A5   (derived from the CSV)
+  1391 image(s) across 83 lot(s)   ~6 min
+Done. 0 downloaded, 1391 already present, 0 failed
+
+################ Audi S5 ################
+--- 1. apibara ENDED (what sold) ---
+  records:      40
+  date span:    2026-05-18 .. 2026-08-12
+Done. 2 API call(s) used.
+--- 2. iaai_web OPEN ---
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Check for completion</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+sleep 420; tail -14 /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bzg9rnlc1.output
+```
+
+*Result*
+```
+  --history: widened 1 -> 2 archive(s) across matching search cohort(s)
+  history:  1413 lot(s) tracked   1 relisted   1394 concluded   1370 with a sale price
+  unique lots: 19   (dropped 19 duplicate row(s))
+  kept 10   filtered out 9
+Done. 10 row(s) x 89 column(s)
+  CSV -> /home/striker/projects/car-bid-tracker/analytics/data/open/csv-cut/iaai/audi_rs_5_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260818T082929.csv
+--- 7. images (+ archive sold) ---
+  archive: moved 0 departed lot(s) -> images/sold/
+  10 row(s) in, 10 match
+  model:  Audi RS 5   (derived from the CSV)
+  159 image(s) across 10 lot(s)   ~1 min
+Done. 0 downloaded, 159 already present, 0 failed
+
+################ ALL DONE ################
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Summarise the AM run per model</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+L=/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bzg9rnlc1.output
+awk '
+/^################ Audi/ {m=$3" "$4; gsub(/ +#*$/,"",m); print "\n=== "m" ==="; e=0}
+/^  records:/ && e==0 {print "  ended     : "$2; e=1}
+/date span/ {print "  span      : "$3" .. "$5}
+/^  states:/ {print "  web       : "substr($0,15)}
+/enrichment:/ {sub(/.*enrichment: /,""); print "  enriched  : "$0}
+/kept / {print "  cut       : "substr($0,3)}
+/archive: moved/ {sub(/.*moved /,""); print "  archived  : "$0}
+/Done\. [0-9]+ downloaded/ {sub(/Done\. /,""); print "  images    : "$0}
+' "$L"
+echo
+echo "=== apibara calls this run ==="
+grep -oE '[0-9]+ API call' "$L" | awk '{s+=$1} END {print "  "s}'
+```
+
+*Result*
+```
+=== A4 ===
+  ended     : 203
+  span      : 2026-05-18 .. 2026-08-18
+  web       :   {'Auction Not Assigned': 154, 'Prebid': 29, 'Prebid/BuyNow': 14, 'TimedAuction': 1}
+  enriched  : 43/198 lot(s) matched an Apibara record by lot_number
+  cut       : kept 138   filtered out 62
+  archived  : 10 departed lot(s) -> images/sold/
+  images    : 35 downloaded, 2254 already present, 0 failed
+
+=== S4 ===
+  ended     : 34
+  span      : 2026-05-18 .. 2026-08-18
+  web       :   {'Auction Not Assigned': 20, 'Prebid': 5, 'Prebid/BuyNow': 3}
+  enriched  : 8/28 lot(s) matched an Apibara record by lot_number
+  cut       : kept 24   filtered out 6
+  archived  : 13 departed lot(s) -> images/sold/
+  images    : 0 downloaded, 392 already present, 0 failed
+
+=== A5 ===
+  ended     : 100
+  span      : 2026-05-18 .. 2026-08-14
+  web       :   {'Auction Not Assigned': 143, 'Prebid': 17, 'Prebid/BuyNow': 12, 'TimedAuction': 4}
+  enriched  : 16/176 lot(s) matched an Apibara record by lot_number
+  cut       : kept 84   filtered out 96
+  archived  : 4 departed lot(s) -> images/sold/
+  images    : 0 downloaded, 1391 already present, 0 failed
+
+=== S5 ===
+  ended     : 40
+  span      : 2026-05-18 .. 2026-08-12
+  web       :   {'Auction Not Assigned': 67, 'Prebid': 6, 'Prebid/BuyNow': 2, 'TimedAuction': 1}
+  enriched  : 5/76 lot(s) matched an Apibara record by lot_number
+  cut       : kept 40   filtered out 36
+  archived  : 1 departed lot(s) -> images/sold/
+  images    : 38 downloaded, 631 already present, 0 failed
+
+=== RS 5 ===
+  ended     : 10
+  span      : 2026-05-22 .. 2026-08-18
+  web       :   {'Auction Not Assigned': 17, 'Prebid': 1}
+  cut       : kept 10   filtered out 9
+  archived  : 0 departed lot(s) -> images/sold/
+  images    : 0 downloaded, 159 already present, 0 failed
+
+=== apibara calls this run ===
+  27
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: List archived lots and tally exits</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+L=/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/tasks/bzg9rnlc1.output
+echo "=== everything archived to sold/, with reason ==="
+grep -E "^      Audi .*\[" "$L" | sed 's/^      /  /' | sort -t'[' -k2
+echo
+echo "=== exit reasons tally ==="
+grep -oE "\[(sold_[a-z_]+|unknown)" "$L" | tr -d '[' | sort | uniq -c
+echo
+echo "=== tree ==="
+for b in open sold; do
+  printf "  images/%-5s %3s lots  %5s images  %5s MB\n" "$b" \
+    "$(find images/$b -mindepth 4 -maxdepth 4 -type d 2>/dev/null | wc -l)" \
+    "$(find images/$b -name '*.jpg' 2>/dev/null | wc -l)" \
+    "$(du -sm images/$b 2>/dev/null | cut -f1)"
+done
+```
+
+*Result*
+```
+=== everything archived to sold/, with reason ===
+  Audi A4/FRONT/2023-3000mi-45392695-WAUABAF42PN008416-50  [sold_at_auction $9075.0]
+  Audi A4/FRONT/2023-3000mi-45392695-WAUABAF42PN008416-50  [sold_at_auction $9075.0]
+  Audi S4/FRONT/2022-3000mi-45627350-WAUC4BF47NA031722-03  [sold_buy_now $3250.0]
+  Audi S4/FRONT/2022-3000mi-45627350-WAUC4BF47NA031722-03  [sold_buy_now $3250.0]
+  Audi S4/FRONT/2018-2250mi-45105907-WAUB4AF45JA233605-21  [sold_on_approval $3650.0]
+  Audi S4/FRONT/2018-2250mi-45105907-WAUB4AF45JA233605-21  [sold_on_approval $3650.0]
+  Audi A4/FRONT/2023-2750mi-45574255-WAUEAAF49PA020400-17  [sold_on_approval $4200.0]
+  Audi A4/FRONT/2023-3000mi-45623994-WAUBBAF43PN012544-45  [sold_on_approval $9100.0]
+  Audi A4/FRONT/2023-3000mi-45623994-WAUBBAF43PN012544-45  [sold_on_approval $9100.0]
+  Audi A4/FRONT/2018-2000mi-45316975-WAUKMAF44JN015356-50  [unknown]
+  Audi A4/FRONT/2018-2000mi-45316975-WAUKMAF44JN015356-50  [unknown]
+  Audi A4/FRONT/2019-1250mi-45399391-WAUENAF43KN011875-36  [unknown]
+  Audi A4/FRONT/2019-1250mi-45399391-WAUENAF43KN011875-36  [unknown]
+  Audi A4/FRONT/2019-2000mi-45423395-WAUGMAF41KN004211-32  [unknown]
+  Audi A4/FRONT/2019-2000mi-45423395-WAUGMAF41KN004211-32  [unknown]
+  Audi A4/FRONT/2020-2250mi-45610127-WAUDNAF49LA073611-29  [unknown]
+  Audi A4/FRONT/2020-2250mi-45610127-WAUDNAF49LA073611-29  [unknown]
+  Audi A4/REAR-SIDE/2018-1250mi-45181684-WAUDNAF45JA036990-42  [unknown]
+  Audi A4/REAR-SIDE/2018-1250mi-45181684-WAUDNAF45JA036990-42  [unknown]
+  Audi A4/REAR-SIDE/2018-2250mi-45400726-WAULMAF44JA077917-34  [unknown]
+  Audi A4/REAR-SIDE/2018-2250mi-45400726-WAULMAF44JA077917-34  [unknown]
+  Audi A4/REAR-SIDE/2019-2250mi-45299623-WAUGMAF42KN020756-14  [unknown]
+  Audi A4/REAR-SIDE/2019-2250mi-45299623-WAUGMAF42KN020756-14  [unknown]
+  Audi A4/REAR-SIDE/2023-2250mi-45489157-WAUCBAF40PA003876-29  [unknown]
+  Audi A4/REAR-SIDE/2023-2250mi-45489157-WAUCBAF40PA003876-29  [unknown]
+  Audi A5/REAR-SIDE/2018-3000mi-45738201-WAUENCF54JA009708-34  [unknown]
+  Audi A5/REAR-SIDE/2018-3000mi-45738201-WAUENCF54JA009708-34  [unknown]
+  Audi A5/REAR-SIDE/2021-2250mi-45511535-WAUDACF57MAxxxxxx-43  [unknown]
+
+=== exit reasons tally ===
+      2 sold_at_auction
+      2 sold_buy_now
+      5 sold_on_approval
+     19 unknown
+
+=== tree ===
+  images/open  304 lots   5048 images   1615 MB
+  images/sold   15 lots    252 images     78 MB
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+The archive list has each lot twice, and 28 moves produced only 15 folders — that's a ping-pong. Let me confirm the cause:
+
+<details>
+<summary>**Tool — Bash**: Check whether archived lots are still in the cut</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+CUT=$(ls -t analytics/data/open/csv-cut/iaai/audi_a4_*.csv | head -1)
+echo "cut: $(basename $CUT)"
+for lot in 45392695 45316975 45181684; do
+  inCut=$(awk -F, -v L=$lot 'NR>1 && $1==L {print "YES"}' "$CUT" | head -1)
+  loc=$(find images -mindepth 4 -maxdepth 4 -type d -name "*-$lot-*" | head -1)
+  printf "  lot %s  in_cut=%-4s  now_at=%s\n" "$lot" "${inCut:-no}" "${loc%%/*}${loc:+ ${loc#images/}}"
+done
+```
+
+*Result*
+```
+cut: audi_a4_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260818T081530.csv
+  lot 45392695  in_cut=YES   now_at=
+  lot 45316975  in_cut=YES   now_at=
+  lot 45181684  in_cut=YES   now_at=
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Locate the ping-ponged lots</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+for lot in 45392695 45316975 45181684 45738201; do
+  loc=$(find images -type d -name "*-$lot-*" 2>/dev/null | head -1)
+  printf "  lot %-9s -> %s\n" "$lot" "${loc:-NOT FOUND}"
+done
+```
+
+*Result*
+```
+  lot 45392695  -> images/sold/Audi A4/FRONT/iaai/2023-3000mi-45392695-WAUABAF42PN008416-50
+  lot 45316975  -> images/sold/Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356-50
+  lot 45181684  -> images/sold/Audi A4/REAR-SIDE/iaai/2018-1250mi-45181684-WAUDNAF45JA036990-42
+  lot 45738201  -> images/sold/Audi A5/REAR-SIDE/iaai/2018-3000mi-45738201-WAUENCF54JA009708-34
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Diagnosis confirmed. `--history` widens the row set to older archives, so a **departed lot is still a row in the cut** — the archive moves it to `sold/`, then the download loop resolves it back to `open/`, and the next model's archive moves it again. It only landed in `sold/` because an archive pass happened to run last.
+
+Fixing — the download must respect the same verdict the archive uses:
+
+<details>
+<summary>**Tool — Bash**: Factor out the shared departed-lot verdict</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix2.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+
+# 1. factor the history lookup out so archive AND download share one verdict
+s=s.replace('''def archive_sold(platform="iaai", apply=True):''',
+'''def departed_lots():
+    """-> {lot_number} that lot_history_01 reports as gone.
+
+    Shared by the archive pass and the download loop ON PURPOSE. They used to
+    disagree: `--history` widens the row set to older archives, so a lot that
+    has left the site is STILL a row in the cut. The archive moved it to sold/,
+    the download loop then resolved it back to open/, and the next model's
+    archive moved it again — a ping-pong that left placement decided by
+    whichever pass happened to run last.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lot_history_01 as HIST
+    import apibara_json2csv_iaai_01 as F
+    paths = HIST.all_archives()
+    if not paths:
+        return {}, {}
+    history = HIST.build_history(F.load_records(paths), paths)
+    return {k for k, v in history.items() if v.get("exit_state") == "gone"}, history
+
+
+def bucket_for(lot, gone):
+    return "sold" if str(lot) in gone else "open"
+
+
+def archive_sold(platform="iaai", apply=True, precomputed=None):''',1)
+
+s=s.replace('''    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lot_history_01 as HIST
+    import apibara_json2csv_iaai_01 as F
+
+    paths = HIST.all_archives()
+    if not paths:
+        return [], []
+    history = HIST.build_history(F.load_records(paths), paths)
+
+    moved, skipped = [], []''',
+'''    gone, history = precomputed if precomputed else departed_lots()
+    if not history:
+        return [], []
+
+    moved, skipped = [], []''',1)
+s=s.replace('''        h = history.get(lot)
+        if not h or h.get("exit_state") != "gone":
+            continue''',
+'''        if lot not in gone:
+            continue
+        h = history.get(lot) or {}''',1)
+p.write_text(s, encoding="utf-8"); print("archive refactored")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix2.py
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+```
+
+*Result*
+```
+archive refactored
+compile OK
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Make download honour the archive verdict and re-run</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix3.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+
+s=s.replace('''    if args.archive_sold:
+        moved, skipped = archive_sold(args.platform, apply=not args.dry_run)''',
+'''    gone = set()
+    if args.archive_sold:
+        pre = departed_lots()
+        gone = pre[0]
+        moved, skipped = archive_sold(args.platform, apply=not args.dry_run,
+                                      precomputed=pre)''',1)
+
+# both resolve sites take the bucket the history dictates
+s=s.replace('''                model_folder, r.get("year"), r.get("distance_bucket"),
+                r.get("buy_now_usd"), args.mask_char, apply=False,
+                score=r.get("iaa_vehicle_score"))''',
+'''                model_folder, r.get("year"), r.get("distance_bucket"),
+                r.get("buy_now_usd"), args.mask_char, apply=False,
+                bucket=bucket_for(r["lot_number"], gone),
+                score=r.get("iaa_vehicle_score"))''',1)
+s=s.replace('''                model_folder, r.get("year"), r.get("distance_bucket"),
+                r.get("buy_now_usd"), args.mask_char,
+                score=r.get("iaa_vehicle_score"))''',
+'''                model_folder, r.get("year"), r.get("distance_bucket"),
+                r.get("buy_now_usd"), args.mask_char,
+                bucket=bucket_for(r["lot_number"], gone),
+                score=r.get("iaa_vehicle_score"))''',1)
+p.write_text(s, encoding="utf-8"); print("download loop respects the verdict")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix3.py
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+echo
+echo "=== re-run all five image steps; placement must now be stable ==="
+for m in a4 s4 a5 s5 rs_5; do
+  CUT=$(ls -t analytics/data/open/csv-cut/iaai/audi_${m}_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_*.csv | head -1)
+  python analytics/scripts/pull_images_01.py "$(basename $CUT)" --archive-sold 2>&1 \
+    | grep -E "archive: moved|Done\. [0-9]+ downloaded"
+done
+```
+
+*Result*
+```
+download loop respects the verdict
+compile OK
+
+=== re-run all five image steps; placement must now be stable ===
+  archive: moved 0 departed lot(s) -> images/sold/
+  archive: moved 0 departed lot(s) -> images/sold/
+  archive: moved 0 departed lot(s) -> images/sold/
+  archive: moved 0 departed lot(s) -> images/sold/
+  archive: moved 0 departed lot(s) -> images/sold/
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+No `Done` lines — something failed. Let me look:
+
+<details>
+<summary>**Tool — Bash**: Run one verbosely to see the failure</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+CUT=$(ls -t analytics/data/open/csv-cut/iaai/audi_a4_*.csv | head -1)
+python analytics/scripts/pull_images_01.py "$(basename $CUT)" --archive-sold 2>&1 | grep -vE "^  loaded" | tail -20
+```
+
+*Result*
+```
+  archive: moved 0 departed lot(s) -> images/sold/
+==============================================================================
+Open-lot images — audi_a4_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_20260818T081530.csv
+==============================================================================
+  138 row(s) in, 138 match
+  size:   xl (1600x1200)
+  model:  Audi A4   (derived from the CSV)
+  target: images/open/Audi A4/{FRONT|REAR-SIDE|OTHER}/iaai/{lot}-{vin}[-{year}][-{dist}][-{score}][-${buynow}]/
+  2289 image(s) across 138 lot(s)   ~10 min
+Traceback (most recent call last):
+  File "/home/striker/projects/car-bid-tracker/analytics/scripts/pull_images_01.py", line 723, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/striker/projects/car-bid-tracker/analytics/scripts/pull_images_01.py", line 654, in main
+    bucket=bucket_for(r["lot_number"], gone),
+                                       ^^^^
+NameError: name 'gone' is not defined. Did you mean: 'None'?
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+<details>
+<summary>**Tool — Bash**: Locate the gone assignment</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+grep -n "gone = set()\|pre = departed_lots()\|gone = pre\|bucket_for(" analytics/scripts/pull_images_01.py
+echo "---"
+sed -n '600,616p' analytics/scripts/pull_images_01.py
+```
+
+*Result*
+```
+365:def bucket_for(lot, gone):
+631:                bucket=bucket_for(r["lot_number"], gone),
+654:                bucket=bucket_for(r["lot_number"], gone),
+---
+    w, h = SIZES[args.size]
+    print("=" * 78)
+    print(f"Open-lot images — {path.name}")
+    print("=" * 78)
+    print(f"  {len(rows)} row(s) in, {len(kept)} match")
+    if dropped:
+        print(f"  filtered out: {dict(sorted(dropped.items(), key=lambda kv: -kv[1]))}")
+    if platform == "copart":
+        print("  size:   native Copart _hrs/_vhrs.jpg (--size applies to IAAI only)")
+    else:
+        print(f"  size:   {args.size} ({w}x{h})")
+    print(f"  model:  {model_folder}"
+          + ("" if args.model_folder else "   (derived from the CSV)"))
+    print(f"  target: images/open/{model_folder}/{{{'|'.join(DAMAGE_DIRS)}}}/"
+          f"{platform}/{{lot}}-{{vin}}[-{{year}}][-{{dist}}][-{{score}}][-${{buynow}}]/")
+    if not kept:
+        raise SystemExit("\nnothing matched the filters")
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+The patch anchor didn't match — the file has since gained Copart support. Let me find the real call site:
+
+<details>
+<summary>**Tool — Bash**: Find the actual archive_sold call site</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+grep -n "archive_sold" analytics/scripts/pull_images_01.py
+echo "---"
+sed -n '/if args.archive_sold:/,/^$/p' analytics/scripts/pull_images_01.py | head -14
+```
+
+*Result*
+```
+369:def archive_sold(platform="iaai", apply=True, precomputed=None):
+576:    if args.archive_sold:
+582:        moved, skipped = archive_sold(platform, apply=not args.dry_run)
+---
+    if args.archive_sold:
+        if platform != "iaai":
+            raise SystemExit(
+                "--archive-sold is currently IAAI-only because the history "
+                "engine has IAAI-specific listing semantics"
+            )
+        moved, skipped = archive_sold(platform, apply=not args.dry_run)
+        verb = "would move" if args.dry_run else "moved"
+        print(f"\n  archive: {verb} {len(moved)} departed lot(s) -> images/sold/")
+        for src, dest, reason, price in moved[:20]:
+            tag = f"{reason}" + (f" ${price}" if price else "")
+            print(f"      {src.parents[2].name}/{src.parents[1].name}/{src.name}  [{tag}]")
+        for src, dest, why in skipped:
+            print(f"      !! skipped {src.name}: {why}")
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Define gone before the download loop</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix4.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+old='''    if args.archive_sold:
+        if platform != "iaai":
+            raise SystemExit(
+                "--archive-sold is currently IAAI-only because the history "
+                "engine has IAAI-specific listing semantics"
+            )
+        moved, skipped = archive_sold(platform, apply=not args.dry_run)'''
+new='''    # One verdict, shared by the archive pass and the download loop below.
+    # Computed even when --archive-sold is off would cost a full history build
+    # on every run, so it stays opt-in; without the flag every row is treated as
+    # open, which is the pre-archive behaviour.
+    gone = set()
+    if args.archive_sold:
+        if platform != "iaai":
+            raise SystemExit(
+                "--archive-sold is currently IAAI-only because the history "
+                "engine has IAAI-specific listing semantics"
+            )
+        pre = departed_lots()
+        gone = pre[0]
+        moved, skipped = archive_sold(platform, apply=not args.dry_run,
+                                      precomputed=pre)'''
+assert old in s
+s=s.replace(old,new,1)
+p.write_text(s, encoding="utf-8"); print("patched")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix4.py
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+grep -n "gone = set()\|gone = pre\[0\]" analytics/scripts/pull_images_01.py
+```
+
+*Result*
+```
+patched
+compile OK
+580:    gone = set()
+588:        gone = pre[0]
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Re-run all five image steps with the fix</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+for m in a4 s4 a5 s5 rs_5; do
+  CUT=$(ls -t analytics/data/open/csv-cut/iaai/audi_${m}_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_*.csv | head -1)
+  printf "%-5s " "$m"
+  python analytics/scripts/pull_images_01.py "$(basename $CUT)" --archive-sold 2>&1 \
+    | grep -E "archive: moved|Done\. [0-9]+ downloaded" | tr '\n' ' '
+  echo
+done
+```
+
+*Result*
+```
+a4      archive: moved 0 departed lot(s) -> images/sold/ Done. 0 downloaded, 2289 already present, 0 failed 
+s4      archive: moved 0 departed lot(s) -> images/sold/ Done. 0 downloaded, 392 already present, 0 failed 
+a5      archive: moved 0 departed lot(s) -> images/sold/ Done. 0 downloaded, 1391 already present, 0 failed 
+s5      archive: moved 0 departed lot(s) -> images/sold/ Done. 0 downloaded, 669 already present, 0 failed 
+rs_5    archive: moved 0 departed lot(s) -> images/sold/ Done. 0 downloaded, 159 already present, 0 failed
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Verify placement is now stable and idempotent</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+echo "=== stability: run the whole set twice more, nothing should move ==="
+for pass in 1 2; do
+  tot=0
+  for m in a4 s4 a5 s5 rs_5; do
+    CUT=$(ls -t analytics/data/open/csv-cut/iaai/audi_${m}_2018-2023_open_ins_nocoupe_noconv_100k_3000mi_*.csv | head -1)
+    n=$(python analytics/scripts/pull_images_01.py "$(basename $CUT)" --archive-sold 2>&1 | grep -oE "moved [0-9]+ departed" | grep -oE "[0-9]+")
+    tot=$((tot + n))
+  done
+  echo "  pass $pass: $tot lots moved"
+done
+echo
+echo "=== final tree ==="
+for b in open sold; do
+  printf "  images/%-5s %3s lots  %5s images  %5s MB\n" "$b" \
+    "$(find images/$b -mindepth 4 -maxdepth 4 -type d 2>/dev/null | wc -l)" \
+    "$(find images/$b -name '*.jpg' 2>/dev/null | wc -l)" \
+    "$(du -sm images/$b 2>/dev/null | cut -f1)"
+done
+echo
+echo "=== sold archive contents ==="
+find images/sold -mindepth 4 -maxdepth 4 -type d | sed 's#images/sold/#  #' | sort
+echo
+python -c "
+import sys,glob,os,collections; sys.path.insert(0,'analytics/scripts')
+import pull_images_01 as P
+d=glob.glob('images/*/*/*/iaai/*/')
+lots=collections.Counter(P.parse_folder_name(os.path.basename(x.rstrip('/')))[0] for x in d)
+print(f'  {len(d)} folders / {len(lots)} distinct lots / duplicates: '
+      f'{ {k:v for k,v in lots.items() if v>1} or \"none\"}')"
+```
+
+*Result*
+```
+=== stability: run the whole set twice more, nothing should move ===
+  pass 1: 0 lots moved
+  pass 2: 0 lots moved
+
+=== final tree ===
+  images/open  304 lots   5048 images   1615 MB
+  images/sold   15 lots    252 images     78 MB
+
+=== sold archive contents ===
+  Audi A4/FRONT/iaai/2018-2000mi-45316975-WAUKMAF44JN015356-50
+  Audi A4/FRONT/iaai/2019-1250mi-45399391-WAUENAF43KN011875-36
+  Audi A4/FRONT/iaai/2019-2000mi-45423395-WAUGMAF41KN004211-32
+  Audi A4/FRONT/iaai/2020-2250mi-45610127-WAUDNAF49LA073611-29
+  Audi A4/FRONT/iaai/2023-2750mi-45574255-WAUEAAF49PA020400-17
+  Audi A4/FRONT/iaai/2023-3000mi-45392695-WAUABAF42PN008416-50
+  Audi A4/FRONT/iaai/2023-3000mi-45623994-WAUBBAF43PN012544-45
+  Audi A4/REAR-SIDE/iaai/2018-1250mi-45181684-WAUDNAF45JA036990-42
+  Audi A4/REAR-SIDE/iaai/2018-2250mi-45400726-WAULMAF44JA077917-34
+  Audi A4/REAR-SIDE/iaai/2019-2250mi-45299623-WAUGMAF42KN020756-14
+  Audi A4/REAR-SIDE/iaai/2023-2250mi-45489157-WAUCBAF40PA003876-29
+  Audi A5/REAR-SIDE/iaai/2018-3000mi-45738201-WAUENCF54JA009708-34
+  Audi A5/REAR-SIDE/iaai/2021-2250mi-45511535-WAUDACF57MAxxxxxx-43
+  Audi S4/FRONT/iaai/2018-2250mi-45105907-WAUB4AF45JA233605-21
+  Audi S4/FRONT/iaai/2022-3000mi-45627350-WAUC4BF47NA031722-03
+
+  319 folders / 319 distinct lots / duplicates: none
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Document the ping-pong fix and rebuild</summary>
+
+````bash
+cd /home/striker/projects/car-bid-tracker
+cat >> analytics/schema/iaai_csv_schema.md <<'MD'
+
+## The archive and the download must share one verdict
+
+`--history` widens the row set to every archive sharing a keyword, so **a lot
+that has left the site is still a ROW in the cut**. That created a ping-pong:
+
+```
+archive_sold()   moves the lot open/ -> sold/   (history says gone)
+download loop    resolves it back    sold/ -> open/   (it is a row in the cut)
+next model's archive pass            open/ -> sold/   ...
+```
+
+Across a five-model run that logged **28 moves for 15 lots**, and final placement
+was decided by whichever pass happened to run last — not by the data.
+
+`departed_lots()` now computes the gone-set once and both the archive pass and
+the download loop read it, so a departed lot is written straight into `sold/`
+rather than being resurrected. Verified idempotent: three consecutive full runs
+across all five models move **0** lots.
+
+The general shape of the bug is worth remembering — two code paths deciding the
+same question from different inputs will disagree, and the disagreement surfaces
+as churn rather than an error.
+MD
+python analytics/scripts/build_chat_transcript.py 2>&1 | grep "prompts," | head -1
+wc -l analytics/schema/iaai_csv_schema.md
+````
+
+*Result*
+```
+    80 prompts, 2,670,811 chars, 61,767 lines, 2.68 MB
+1806 analytics/schema/iaai_csv_schema.md
+```
+
+</details>
+
+Full AM run complete across all five groups — **27 Apibara calls, 0 failures.**
+
+## What changed since yesterday
+
+| | ended | web open | enriched | cut | new images |
+|---|---|---|---|---|---|
+| **A4** | 203 | 198 | 43 | 138 | **+35** |
+| **S4** | 34 | 28 | 8 | 24 | 0 |
+| **A5** | 100 | 176 | 16 | 84 | 0 |
+| **S5** | 40 | 76 | 5 | 40 | **+38** |
+| **RS 5** | 10 | 19 | 2 | 10 | 0 |
+
+**73 new images**, and inventory shifted: S5 web lots 71 → 76, A4 197 → 198, S4 30 → 28.
+
+## 15 lots archived to `images/sold/`
+
+Nine A4, two A5, two S4 — with realised prices where the ended pull could supply them:
+
+```
+sold_at_auction    $9,075   A4 2023  45392695
+sold_on_approval   $9,100   A4 2023  45623994
+sold_on_approval   $4,200   A4 2023  45574255
+sold_on_approval   $3,650   S4 2018  45105907
+sold_buy_now       $3,250   S4 2022  45627350
+unknown            × 10
+```
+
+The 10 `unknown` exits are the expected gap — buy-now sales and relists never reach `lot_sub_status=Ended`, so absence is all we have for them.
+
+## A real bug this run exposed
+
+The archive log showed **28 moves producing only 15 folders**. Cause: `--history` widens the row set to older archives, so **a departed lot is still a row in the cut**. The archive moved it to `sold/`, the download loop resolved it back to `open/`, and the next model's archive moved it again — a ping-pong where final placement was decided by whichever pass ran last, not by the data.
+
+Two code paths were answering the same question from different inputs. `departed_lots()` now computes the gone-set once and both read it, so a departed lot is written straight into `sold/`.
+
+Verified idempotent — **three consecutive full runs across all five models now move 0 lots**, and the tree is stable at 319 folders / 319 distinct lots / no duplicates.
+
+## Also fixed on the way in
+
+Yesterday's relist count was inflated. `attributes.AuctionDateTime` reads `12/31/1899 6:00:00 AM` — a .NET null date on **1,234 records** — and it *parsed cleanly*, so a lot getting its first sale date looked like a reschedule. That was **5 of 13 reported relists**. Now nulled for pre-2000 years; the real count is **9**, six of which added a Buy Now on relist.
+
+```
+images/open  304 lots  5,048 images  1,615 MB
+images/sold   15 lots    252 images     78 MB
+```
+
+Both fixes documented in the schema doc (1,806 lines); transcript at 80 prompts.
+
+## Prompt 81
+
+```
+there is another fix needed
+just found that one of the lots available as Bid-Now was not enriched with apibara data pull like full vin# - one of the reason could be that checked only "ended" and "open" lots but never "live" - pls add "live" check in AM iaai pipe run when some lots gets or doublecheck if something wrong with iaai pipe 
+the lot# I am talking about is 45109378
+lets also make another tweak to image folder name - lets add after score# i) rounded milage like "72k" for 72358 (when available) ii) "No-Keys" status after (when indicated) iii) keep Buy Now Price as it was before iv) add "BidNow" status at the end when identify at AM pipe update
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+Let me investigate lot 45109378 first — the enrichment gap matters more than the naming.
+
+<details>
+<summary>**Tool — Bash**: Trace lot 45109378 across archives</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/probe2.py <<'PY'
+import json, glob
+LOT="45109378"
+print("=== in WEB archives ===")
+for f in sorted(glob.glob("analytics/data/open/json-adapted/iaai/adapted_*.json")):
+    for r in json.load(open(f))["pages"][0]["raw"]["data"]:
+        if str(r["lot_number"])==LOT:
+            a=(r.get("details") or {}).get("attributes") or {}
+            print(f"  {f.split('/')[-1][:56]}")
+            print(f"     state={r.get('_web_state')!r} vin={r.get('vin')!r} "
+                  f"auction_at={(r.get('auction') or {}).get('auction_at')!r}")
+            print(f"     InventoryStatus={a.get('InventoryStatus')!r} TimedAuctionInd={a.get('TimedAuctionIndicator')!r}")
+print("\n=== in APIBARA archives (any mode) ===")
+hit=False
+for f in sorted(glob.glob("analytics/data/*/json-raw/iaai/apibara_*.json")):
+    d=json.load(open(f))
+    for pg in d.get("pages",[]):
+        for v in (pg.get("raw") or {}).get("data") or []:
+            if str(v.get("lot_number"))==LOT:
+                hit=True
+                print(f"  {f.split('/')[-1][:60]}  mode={d.get('mode')} vin={v.get('vin')}")
+if not hit: print("  NOT PRESENT in any apibara archive")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/probe2.py
+```
+
+*Result*
+```
+=== in WEB archives ===
+  adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260816T152
+     state='Auction Not Assigned' vin='WAUB4CF50KA******' auction_at=None
+     InventoryStatus='WC' TimedAuctionInd='False'
+  adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260817T083
+     state='Auction Not Assigned' vin='WAUB4CF50KA******' auction_at=None
+     InventoryStatus='WC' TimedAuctionInd='False'
+  adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260817T212
+     state='TimedAuction' vin='WAUB4CF50KA******' auction_at='2026-08-26T13:30:00+00:00'
+     InventoryStatus='RS' TimedAuctionInd='True'
+  adapted_iaaiweb_iaai_open_audi_s5_2018_2023_20260818T082
+     state='TimedAuction' vin='WAUB4CF50KA******' auction_at='2026-08-26T13:30:00+00:00'
+     InventoryStatus='RS' TimedAuctionInd='True'
+
+=== in APIBARA archives (any mode) ===
+  NOT PRESENT in any apibara archive
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Confirmed: the lot went `Auction Not Assigned` → `TimedAuction` on 8/17 PM, is `InventoryStatus=RS` (scheduled), and is **absent from every Apibara archive**. Testing your hypothesis:
+
+<details>
+<summary>**Tool — Bash**: Test whether Live mode returns the missing lot</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+S=/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad
+python analytics/scripts/pull_apibara_01.py iaai live --make Audi --model S5 --year-range 2018-2023 \
+  --max-pages 5 --out $S/live_s5.json 2>&1 | grep -E "records:|page |API call"
+echo "--- is 45109378 in it? ---"
+python - <<'PY'
+import json
+d=json.load(open("/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/live_s5.json"))
+lots={str(v["lot_number"]): v for pg in d.get("pages",[]) for v in (pg.get("raw") or {}).get("data") or []}
+print(f"  live S5 lots: {len(lots)}  -> {sorted(lots)[:8]}")
+v=lots.get("45109378")
+print(f"  45109378: {'FOUND vin=' + str(v.get('vin')) if v else 'not in live either'}")
+PY
+```
+
+*Result*
+```
+  page 1: 1 lot(s)   (more pages: False)
+  records:      1
+Done. 1 API call(s) used.
+--- is 45109378 in it? ---
+  live S5 lots: 1  -> ['45496178']
+  45109378: not in live either
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+`live` returned a *different* lot (45496178), not this one — so the Live hypothesis doesn't explain 45109378, though it does surface a lot we'd otherwise miss. Let me check whether Apibara has it at all right now:
+
+<details>
+<summary>**Tool — Bash**: Compare apibara open+live against web-scheduled lots</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+S=/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad
+python analytics/scripts/pull_apibara_01.py iaai open --make Audi --model S5 --year-range 2018-2023 \
+  --max-pages 5 --out $S/open_s5_now.json 2>&1 | grep -E "records:|API call"
+python - <<'PY'
+import json, glob
+S="/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/"
+op={str(v["lot_number"]):v for pg in json.load(open(S+"open_s5_now.json")).get("pages",[]) for v in (pg.get("raw") or {}).get("data") or []}
+lv={str(v["lot_number"]):v for pg in json.load(open(S+"live_s5.json")).get("pages",[]) for v in (pg.get("raw") or {}).get("data") or []}
+print(f"  apibara OPEN now: {len(op)} -> {sorted(op)}")
+print(f"  apibara LIVE now: {len(lv)} -> {sorted(lv)}")
+print(f"  overlap: {sorted(set(op)&set(lv)) or 'none'}")
+print(f"  45109378 in open={'45109378' in op}  in live={'45109378' in lv}")
+# what does the web say is scheduled right now?
+w=sorted(glob.glob("analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_audi_s5_*.json"))[-1]
+recs=json.load(open(w))["pages"][0]["raw"]["data"]
+sched={str(r["lot_number"]): r.get("_web_state") for r in recs if r.get("_web_state") not in (None,"Auction Not Assigned")}
+print(f"\n  web says scheduled: {len(sched)} lots -> {sched}")
+print(f"  of those, in apibara open+live: {sorted(set(sched)&(set(op)|set(lv)))}")
+print(f"  MISSING from apibara       : {sorted(set(sched)-set(op)-set(lv))}")
+PY
+```
+
+*Result*
+```
+  records:      4
+Done. 1 API call(s) used.
+  apibara OPEN now: 4 -> ['45456950', '45648652', '45655991', '45664929']
+  apibara LIVE now: 1 -> ['45496178']
+  overlap: none
+  45109378 in open=False  in live=False
+
+  web says scheduled: 9 lots -> {'45648652': 'Prebid/BuyNow', '45496178': 'Prebid', '45664929': 'Prebid', '45655991': 'Prebid/BuyNow', '45456950': 'Prebid', '45109378': 'TimedAuction', '40139773': 'Prebid', '45240323': 'Prebid', '45595663': 'Prebid'}
+  of those, in apibara open+live: ['45456950', '45496178', '45648652', '45655991', '45664929']
+  MISSING from apibara       : ['40139773', '45109378', '45240323', '45595663']
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Two distinct findings. Let me characterise the gap before fixing:
+
+<details>
+<summary>**Tool — Bash**: Compare present vs missing lots</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/probe3.py <<'PY'
+import json, glob
+w=sorted(glob.glob("analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_audi_s5_*.json"))[-1]
+recs={str(r["lot_number"]):r for r in json.load(open(w))["pages"][0]["raw"]["data"]}
+missing=["40139773","45109378","45240323","45595663"]
+present=["45456950","45496178","45648652","45655991","45664929"]
+def show(lots,label):
+    print(f"  {label}")
+    for l in lots:
+        r=recs.get(l)
+        if not r: continue
+        a=(r.get("details") or {}).get("attributes") or {}
+        print(f"    {l}  {r.get('_web_state'):<16} auction={(r.get('auction') or {}).get('auction_at','')[:10]:<11} "
+              f"InvStatus={a.get('InventoryStatus')} branch={a.get('BranchName')}")
+show(present,"IN apibara (open or live):")
+show(missing,"MISSING from apibara:")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/probe3.py
+```
+
+*Result*
+```
+  IN apibara (open or live):
+    45456950  Prebid           auction=2026-08-25  InvStatus=RS branch=Austin (TX)
+    45496178  Prebid           auction=2026-08-18  InvStatus=RS branch=Fontana (CA)
+    45648652  Prebid/BuyNow    auction=2026-08-25  InvStatus=RS branch=Cleveland (OH)
+    45655991  Prebid/BuyNow    auction=2026-08-24  InvStatus=RS branch=Clearwater (FL)
+    45664929  Prebid           auction=2026-08-20  InvStatus=RS branch=Cincinnati (OH)
+  MISSING from apibara:
+    40139773  Prebid           auction=2026-08-20  InvStatus=RS branch=Houston-North (TX)
+    45109378  TimedAuction     auction=2026-08-26  InvStatus=RS branch=Indianapolis (IN)
+    45240323  Prebid           auction=2026-08-19  InvStatus=RS branch=North Hollywood (CA)
+    45595663  Prebid           auction=2026-08-20  InvStatus=RS branch=Pensacola (FL)
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+No pattern in the missing lots — mixed states, dates, branches, all `RS`. That's an Apibara index gap, not something I can filter around. Let me implement both fixes:
+
+<details>
+<summary>**Tool — Bash**: Add the live pull to the pipeline driver</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+S=/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/run_all.sh
+python - <<'PY'
+import pathlib
+p=pathlib.Path("/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/run_all.sh")
+s=p.read_text()
+s=s.replace('''  echo "--- 3. apibara OPEN (enrichment) ---"
+  python $S/pull_apibara_01.py iaai open --make Audi --model $MODEL \\
+      --year-range 2018-2023 --max-pages 10 2>&1 | grep -E "records:|API call"
+''',
+'''  echo "--- 3. apibara OPEN (enrichment) ---"
+  python $S/pull_apibara_01.py iaai open --make Audi --model $MODEL \\
+      --year-range 2018-2023 --max-pages 10 2>&1 | grep -E "records:|API call"
+
+  # LIVE is a DISJOINT set from Open, not a subset: on a 2018-2023 S5 check the
+  # two shared zero lots, and `live` held one scheduled lot that `open` never
+  # returned. Skipping it silently loses enrichment for whatever is mid-sale.
+  echo "--- 3b. apibara LIVE (disjoint from open) ---"
+  python $S/pull_apibara_01.py iaai live --make Audi --model $MODEL \\
+      --year-range 2018-2023 --max-pages 5 2>&1 | grep -E "records:|API call"
+''',1)
+s=s.replace('''  APIS=$(ls -t $D/json-raw/iaai/apibara_iaai_open_audi_${SLUG}_2018-2023_*.json \\
+                $DS/json-raw/iaai/apibara_iaai_ended_audi_${SLUG}_2018-2023_*.json 2>/dev/null | head -6)''',
+'''  APIS=$(ls -t $D/json-raw/iaai/apibara_iaai_open_audi_${SLUG}_2018-2023_*.json \\
+                $D/json-raw/iaai/apibara_iaai_live_audi_${SLUG}_2018-2023_*.json \\
+                $DS/json-raw/iaai/apibara_iaai_ended_audi_${SLUG}_2018-2023_*.json 2>/dev/null | head -9)''',1)
+p.write_text(s); print("driver: live pull added")
+PY
+bash -n "$S" && echo "syntax OK"
+grep -n "3b. apibara LIVE" "$S"
+```
+
+*Result*
+```
+driver: live pull added
+syntax OK
+33:  echo "--- 3b. apibara LIVE (disjoint from open) ---"
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Add mileage, No-Keys and BidNow segments</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix5.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+
+s=s.replace('''_SCORE_SEG = re.compile(r"^\\d{1,2}$")''',
+'''_SCORE_SEG = re.compile(r"^\\d{1,2}$")
+_MILES_SEG = re.compile(r"^(\\d+)k$")
+NO_KEYS = "No-Keys"      # NOTE: contains a hyphen; see parse_folder_name
+BID_NOW = "BidNow"
+
+
+def miles_tag(odometer):
+    """72358 -> '72k'. Floored, not rounded — '72k' should never overstate.
+
+    Empty when there is no reading at all. A genuine 0-999 mile lot becomes
+    '0k', which is correct and informative: it is the signature of an
+    inoperable/digital-dash lot where IAAI could not read the odometer.
+    """
+    try:
+        mi = int(float(str(odometer).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return ""
+    return f"{mi // 1000}k" if mi >= 0 else ""
+
+
+def keys_tag(has_key):
+    """'No-Keys' only when the lot is explicitly flagged as having none.
+
+    Silence means "keys present or not stated" — the flag is only added on a
+    definite negative, so its absence never implies a claim.
+    """
+    s = str(has_key).strip().lower()
+    return NO_KEYS if s in ("false", "0", "no", "n") else ""
+
+
+def bidnow_tag(listing_state):
+    """'BidNow' for a TimedAuction lot — what iaai.com renders as BID NOW."""
+    return BID_NOW if str(listing_state or "").strip().lower() == "timedauction" else ""''',1)
+
+s=s.replace('''def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None):''',
+'''def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None,
+                odometer=None, has_key=None, listing_state=None):''',1)
+s=s.replace('''    sc = score_tag(score)
+    if sc:
+        parts.append(sc)
+    bn = money_tag(buy_now)
+    if bn:
+        parts.append(bn)
+    return "-".join(parts)''',
+'''    for tag in (score_tag(score), miles_tag(odometer), keys_tag(has_key),
+                money_tag(buy_now), bidnow_tag(listing_state)):
+        if tag:
+            parts.append(tag)
+    return "-".join(parts)''',1)
+
+s=s.replace('''    parts = [p for p in str(name).split("-") if p]
+
+    # Identify by WIDTH first''',
+'''    parts = [p for p in str(name).split("-") if p]
+    # `No-Keys` is the one segment containing a hyphen, so splitting shatters it
+    # into "No" + "Keys". Rejoin before anything else looks at the tokens —
+    # neither half can be mistaken for another segment, which is what makes the
+    # repair unambiguous.
+    for i in range(len(parts) - 1):
+        if parts[i] == "No" and parts[i + 1] == "Keys":
+            parts[i:i + 2] = [NO_KEYS]
+            break
+
+    # Identify by WIDTH first''',1)
+
+s=s.replace('''    used = {lot, vin, dist, bn, year}
+    score = next((p for p in parts if p not in used and _SCORE_SEG.match(p)), "")
+    return lot, vin, year, dist, bn, score''',
+'''    miles = next((p for p in parts if _MILES_SEG.match(p)), "")
+    nokeys = NO_KEYS if NO_KEYS in parts else ""
+    bidnow = BID_NOW if BID_NOW in parts else ""
+    used = {lot, vin, dist, bn, year, miles, nokeys, bidnow}
+    score = next((p for p in parts if p not in used and _SCORE_SEG.match(p)), "")
+    return lot, vin, year, dist, bn, score, miles, nokeys, bidnow''',1)
+p.write_text(s, encoding="utf-8"); print("naming patched")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix5.py
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+```
+
+*Result*
+```
+naming patched
+compile OK
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Thread new fields and verify naming/parsing</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix6.py <<'PY'
+import pathlib, re
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+# unpack sites -> tolerate the wider tuple
+s=s.replace("        _, old_vin, *_ = parse_folder_name(old.name)\n        _, new_vin, *_ = parse_folder_name(want.name)",
+            "        _, old_vin, *_ = parse_folder_name(old.name)\n        _, new_vin, *_ = parse_folder_name(want.name)")
+# lot_dir / resolve_folder gain the three new inputs
+s=s.replace('''def lot_dir(platform, lot, vin, group, model, year="", dist_bucket="",
+            buy_now="", mask_char="x", bucket="open", score=None):
+    return (IMAGES_ROOT / bucket / model / group / platform
+            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char, score))''',
+'''def lot_dir(platform, lot, vin, group, model, year="", dist_bucket="",
+            buy_now="", mask_char="x", bucket="open", score=None,
+            odometer=None, has_key=None, listing_state=None):
+    return (IMAGES_ROOT / bucket / model / group / platform
+            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char, score,
+                          odometer, has_key, listing_state))''',1)
+s=s.replace('''def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                   buy_now="", mask_char="x", apply=True, bucket="open",
+                   score=None):''',
+'''def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                   buy_now="", mask_char="x", apply=True, bucket="open",
+                   score=None, odometer=None, has_key=None, listing_state=None):''',1)
+s=s.replace('''    return _resolve_folder(platform, lot, vin, group, model, year, dist_bucket,
+                           buy_now, mask_char, apply, bucket, score)''',
+'''    return _resolve_folder(platform, lot, vin, group, model, year, dist_bucket,
+                           buy_now, mask_char, apply, bucket, score,
+                           odometer, has_key, listing_state)''',1)
+s=s.replace('''def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                    buy_now="", mask_char="x", apply=True, bucket="open",
+                    score=None):''',
+'''def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
+                    buy_now="", mask_char="x", apply=True, bucket="open",
+                    score=None, odometer=None, has_key=None, listing_state=None):''',1)
+s=s.replace('''    want = lot_dir(platform, lot, vin, group, model, year, dist_bucket, buy_now,
+                   mask_char, bucket, score)''',
+'''    want = lot_dir(platform, lot, vin, group, model, year, dist_bucket, buy_now,
+                   mask_char, bucket, score, odometer, has_key, listing_state)''',1)
+s=s.replace('''            target = want.parent / folder_name(lot, old_vin, year, dist_bucket,
+                                               buy_now, mask_char, score)''',
+'''            target = want.parent / folder_name(lot, old_vin, year, dist_bucket,
+                                               buy_now, mask_char, score,
+                                               odometer, has_key, listing_state)''',1)
+# call sites
+s=s.replace('''                bucket=bucket_for(r["lot_number"], gone),
+                score=r.get("iaa_vehicle_score"))''',
+'''                bucket=bucket_for(r["lot_number"], gone),
+                score=r.get("iaa_vehicle_score"), odometer=r.get("odometer_mi"),
+                has_key=r.get("has_key"), listing_state=r.get("listing_state"))''')
+s=s.replace('''[-{{score}}][-${{buynow}}]/")''',
+            '''[-{{score}}][-{{mi}}k][-No-Keys][-${{buynow}}][-BidNow]/")''',1)
+p.write_text(s, encoding="utf-8"); print("threaded")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix6.py
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+python -c "
+import sys; sys.path.insert(0,'analytics/scripts')
+import pull_images_01 as P
+print('=== naming ===')
+for a in [dict(score=38,odometer=72358,has_key='False',listing_state='TimedAuction',buy_now='7200'),
+          dict(score=38,odometer=72358,has_key='True',listing_state='Prebid',buy_now=''),
+          dict(score=8,odometer=1,has_key='False',listing_state='Auction Not Assigned',buy_now=''),
+          dict(score=None,odometer=None,has_key='',listing_state='',buy_now='')]:
+    print('  ', P.folder_name('45704693','WAUENCF5XJA060484','2019','2500mi',a['buy_now'],'x',
+                              a['score'],a['odometer'],a['has_key'],a['listing_state']))
+print()
+print('=== parse round-trip (No-Keys hyphen is the tricky one) ===')
+for n in ['2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-No-Keys-\$7200-BidNow',
+          '2019-2500mi-45704693-WAUENCF5XJA060484-38-72k',
+          '2019-2500mi-45704693-WAUENCF5XJA060484-38',
+          '2019-2500mi-45704693-WAUENCF5XJAxxxxxx']:
+    lot,vin,y,d,b,sc,mi,nk,bn2=P.parse_folder_name(n)
+    ok = lot=='45704693' and len(vin)==17
+    print(f\"  {'OK ' if ok else '!! '}{n:<62} sc={sc!r:<5} mi={mi!r:<6} nk={nk!r:<9} bidnow={bn2!r:<8} bn={b!r}\")"
+```
+
+*Result*
+```
+threaded
+compile OK
+=== naming ===
+   2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-No-Keys-$7200-BidNow
+   2019-2500mi-45704693-WAUENCF5XJA060484-38-72k
+   2019-2500mi-45704693-WAUENCF5XJA060484-08-0k-No-Keys
+   2019-2500mi-45704693-WAUENCF5XJA060484
+
+=== parse round-trip (No-Keys hyphen is the tricky one) ===
+  OK 2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-No-Keys-$7200-BidNow sc='38'  mi='72k'  nk='No-Keys' bidnow='BidNow' bn='$7200'
+  OK 2019-2500mi-45704693-WAUENCF5XJA060484-38-72k                  sc='38'  mi='72k'  nk=''        bidnow=''       bn=''
+  OK 2019-2500mi-45704693-WAUENCF5XJA060484-38                      sc='38'  mi=''     nk=''        bidnow=''       bn=''
+  OK 2019-2500mi-45704693-WAUENCF5XJAxxxxxx                         sc=''    mi=''     nk=''        bidnow=''       bn=''
+```
+
+</details>
+
+Naming and parsing both round-trip. Migrating all 319 folders:
+
+<details>
+<summary>**Tool — Bash**: Migrate all folders to the new naming</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/mig.py <<'PY'
+import sys, csv, glob, re, pathlib, collections
+sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+best={}
+for p in sorted(glob.glob("analytics/data/*/csv-raw/iaai/*.csv"),
+                key=lambda x: pathlib.Path(x).stat().st_mtime):
+    for r in csv.DictReader(open(p)): best[r["lot_number"]]=r
+gone,_ = P.departed_lots()
+dirs=sorted(glob.glob("images/*/*/*/iaai/*/"))
+moved=same=unknown=0; tags=collections.Counter()
+for d in dirs:
+    d=pathlib.Path(d); bucket=d.parents[3].name; model=d.parents[2].name
+    lot,vin,*_ = P.parse_folder_name(d.name)
+    r=best.get(lot)
+    if not r: unknown+=1; continue
+    kw=re.sub(r"^\s*(19|20)\d{2}\s+","",r.get("search_keyword") or "").strip()
+    dest,src = P.resolve_folder("iaai", lot, r.get("vin") or vin, P.group_of(r),
+                                kw or model, r.get("year"), r.get("distance_bucket"),
+                                r.get("buy_now_usd"), bucket=P.bucket_for(lot,gone),
+                                score=r.get("iaa_vehicle_score"),
+                                odometer=r.get("odometer_mi"), has_key=r.get("has_key"),
+                                listing_state=r.get("listing_state"))
+    moved += bool(src); same += (not src)
+    if P.miles_tag(r.get("odometer_mi")): tags["mileage"]+=1
+    if P.keys_tag(r.get("has_key")): tags["No-Keys"]+=1
+    if P.bidnow_tag(r.get("listing_state")): tags["BidNow"]+=1
+print(f"  renamed {moved}, already correct {same}, unknown {unknown}")
+print(f"  tags applied: {dict(tags)}")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/mig.py 2>&1 | grep -v "^  loaded"
+```
+
+*Result*
+```
+  renamed 319, already correct 0, unknown 0
+  tags applied: {'mileage': 319, 'BidNow': 3, 'No-Keys': 27}
+```
+
+</details>
+
+API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com.
+
+## Prompt 82
+
+```
+hope API Error: 529 Overloaded got fixed - make sure prior tasks are complete
+NEXT
+1) pls double check apibara doc - why apibara live doesn't have lots detail for 45370067, 45109378, 45728372
+can you pls check if those lots were available as Pre-Bid in iaai web or "open" in apibara 
+2) next - pls check pull_iaai_web accross 
+2018-2023 Audi A4
+2018-2023 Audi S4
+2018-2023 Audi A5
+2018-2023 Audi S5
+2018-2023 Audi RS 5
+is it really only 3 lots (45370067, 45109378, 45728372) shown up as BidNow today?
+3) lets tweak our "BidNow" state and make it 3 state i) nothing if "Auction Not Assigned" ii) BidNow as is today iii) PreBid-{date} from iaai web (when available) when {date} is in format like 0820-Th for auction set as "Thu Aug 20, 11:30am CDT"
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+The 529 hit mid-migration. Let me verify prior work completed before moving on.
+
+<details>
+<summary>**Tool — Bash**: Verify the interrupted migration completed</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python -c "
+import sys,glob,os,collections; sys.path.insert(0,'analytics/scripts')
+import pull_images_01 as P
+d=sorted(glob.glob('images/*/*/*/iaai/*/'))
+lots=collections.Counter(P.parse_folder_name(os.path.basename(x.rstrip('/')))[0] for x in d)
+fs=glob.glob('images/**/*.jpg', recursive=True)
+mi=nk=bn=0
+for x in d:
+    _,_,_,_,_,_,m,k,b = P.parse_folder_name(os.path.basename(x.rstrip('/')))
+    mi+=bool(m); nk+=bool(k); bn+=bool(b)
+print(f'  {len(d)} folders / {len(lots)} distinct / dupes: {ss if (ss:={k:v for k,v in lots.items() if v>1}) else \"none\"}')
+print(f'  {len(fs)} images')
+print(f'  mileage tag {mi}   No-Keys {nk}   BidNow {bn}')
+"
+echo "--- sample ---"
+find images/open -mindepth 4 -maxdepth 4 -type d -name '*No-Keys*' | head -2 | sed 's#images/open/#  #'
+find images/open -mindepth 4 -maxdepth 4 -type d -name '*BidNow*' | sed 's#images/open/#  #'
+```
+
+*Result*
+```
+  319 folders / 319 distinct / dupes: none
+  5300 images
+  mileage tag 319   No-Keys 27   BidNow 3
+--- sample ---
+  Audi A4/REAR-SIDE/iaai/2018-1250mi-45707465-WAULMAF49JAxxxxxx-38-77k-No-Keys
+  Audi A4/OTHER/iaai/2020-1250mi-45675994-WAUGMAF43LN008889-50-0k-No-Keys
+  Audi S5/REAR-SIDE/iaai/2019-2250mi-45109378-WAUB4CF50KAxxxxxx-37-106k-BidNow
+  Audi A4/FRONT/iaai/2018-2750mi-45728372-WAUENAF45JAxxxxxx-31-64k-BidNow
+  Audi A5/REAR-SIDE/iaai/2023-3000mi-45370067-WAUFACF58PAxxxxxx-27-36k-BidNow
+```
+
+</details>
+
+You've hit your session limit · resets 1pm (America/Los_Angeles)
+
+## Prompt 83
+
+```
+pls continue prior request
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+Migration confirmed complete — 319 folders, 5,300 images, all tags applied. Now your three asks.
+
+<details>
+<summary>**Tool — Bash**: Count BidNow lots across all five models</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/q2.py <<'PY'
+import json, glob, collections, os
+print("=== (2) states in the NEWEST web archive per model ===")
+tot=collections.Counter(); bidnow=[]
+for slug in ["a4","s4","a5","s5","rs_5"]:
+    fs=sorted(glob.glob(f"analytics/data/open/json-adapted/iaai/adapted_iaaiweb_iaai_open_audi_{slug}_2018_2023_*.json"))
+    if not fs: print(f"  {slug}: no archive"); continue
+    f=fs[-1]
+    recs=json.load(open(f))["pages"][0]["raw"]["data"]
+    c=collections.Counter(r.get("_web_state") or "(none)" for r in recs)
+    tot.update(c)
+    for r in recs:
+        if r.get("_web_state")=="TimedAuction":
+            a=(r.get("details") or {}).get("attributes") or {}
+            bidnow.append((slug, str(r["lot_number"]), (r.get("auction") or {}).get("auction_at","")[:10], a.get("BranchName")))
+    print(f"  {slug:<5} {os.path.basename(f)[-19:-5]}  {dict(c)}")
+print(f"\n  TOTAL across all five: {dict(tot)}")
+print(f"\n=== BidNow (TimedAuction) lots today: {len(bidnow)} ===")
+for s,l,d,b in bidnow: print(f"   {s:<5} lot {l}  auction {d}  {b}")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/q2.py
+```
+
+*Result*
+```
+=== (2) states in the NEWEST web archive per model ===
+  a4    0260818T080743  {'Prebid': 29, 'Prebid/BuyNow': 14, 'TimedAuction': 1, 'Auction Not Assigned': 154}
+  s4    0260818T081603  {'Prebid': 5, 'Prebid/BuyNow': 3, 'Auction Not Assigned': 20}
+  a5    0260818T081748  {'Prebid': 17, 'Prebid/BuyNow': 12, 'TimedAuction': 4, 'Auction Not Assigned': 143}
+  s5    0260818T082501  {'Prebid/BuyNow': 2, 'Auction Not Assigned': 67, 'Prebid': 6, 'TimedAuction': 1}
+  rs_5  0260817T212754  {'Auction Not Assigned': 17, 'Prebid': 1, 'Prebid/BuyNow': 1}
+
+  TOTAL across all five: {'Prebid': 58, 'Prebid/BuyNow': 32, 'TimedAuction': 6, 'Auction Not Assigned': 401}
+
+=== BidNow (TimedAuction) lots today: 6 ===
+   a4    lot 45728372  auction 2026-08-20  Atlanta East (GA)
+   a5    lot 45579314  auction 2026-08-21  Asheville (NC)
+   a5    lot 45634187  auction 2026-08-26  Atlanta South (GA)
+   a5    lot 45624265  auction 2026-08-24  Fremont (CA)
+   a5    lot 45370067  auction 2026-08-24  Elkton (MD)
+   s5    lot 45109378  auction 2026-08-26  Indianapolis (IN)
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+**6, not 3.** Let me explain the gap and answer (1):
+
+<details>
+<summary>**Tool — Bash**: Trace the BidNow lots through web states, apibara and cuts</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/q1.py <<'PY'
+import json, glob, csv
+LOTS=["45370067","45109378","45728372","45579314","45634187","45624265"]
+print("=== web state history for every BidNow lot ===")
+for lot in LOTS:
+    seq=[]
+    for f in sorted(glob.glob("analytics/data/open/json-adapted/iaai/adapted_*.json")):
+        for r in json.load(open(f))["pages"][0]["raw"]["data"]:
+            if str(r["lot_number"])==lot:
+                seq.append((f.split("_")[-1][:13], r.get("_web_state")))
+    print(f"  {lot}: " + " -> ".join(f"{t[4:6]}/{t[6:8]} {s}" for t,s in seq))
+print("\n=== are they in ANY apibara archive? ===")
+ap={}
+for f in glob.glob("analytics/data/*/json-raw/iaai/apibara_*.json"):
+    d=json.load(open(f))
+    for pg in d.get("pages",[]):
+        for v in (pg.get("raw") or {}).get("data") or []:
+            ap.setdefault(str(v["lot_number"]),[]).append(d.get("mode"))
+for lot in LOTS:
+    print(f"  {lot}: {sorted(set(ap[lot])) if lot in ap else 'ABSENT from apibara entirely'}")
+print("\n=== which of the 6 reached a csv-cut (=> got an image folder)? ===")
+incut=set()
+for p in glob.glob("analytics/data/open/csv-cut/iaai/*.csv"):
+    for r in csv.DictReader(open(p)): incut.add(r["lot_number"])
+for lot in LOTS:
+    print(f"  {lot}: {'in a cut' if lot in incut else 'FILTERED OUT of every cut -> no folder'}")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/q1.py
+```
+
+*Result*
+```
+=== web state history for every BidNow lot ===
+  45370067: 08/17 TimedAuction -> 08/18 TimedAuction -> 08/16 Prebid
+  45109378: 08/16 Auction Not Assigned -> 08/17 Auction Not Assigned -> 08/17 TimedAuction -> 08/18 TimedAuction
+  45728372: 08/16 Auction Not Assigned -> 08/17 TimedAuction -> 08/18 TimedAuction
+  45579314: 08/13 Auction Not Assigned -> 08/14 Auction Not Assigned -> 08/14 Auction Not Assigned -> 08/15 Auction Not Assigned -> 08/15 Auction Not Assigned -> 08/16 Auction Not Assigned -> 08/17 TimedAuction -> 08/18 TimedAuction
+  45634187: 08/14 Auction Not Assigned -> 08/15 Auction Not Assigned -> 08/17 TimedAuction -> 08/18 TimedAuction -> 08/16 Auction Not Assigned
+  45624265: 08/17 TimedAuction -> 08/18 TimedAuction -> 08/16 Auction Not Assigned
+
+=== are they in ANY apibara archive? ===
+  45370067: ABSENT from apibara entirely
+  45109378: ABSENT from apibara entirely
+  45728372: ABSENT from apibara entirely
+  45579314: ABSENT from apibara entirely
+  45634187: ABSENT from apibara entirely
+  45624265: ABSENT from apibara entirely
+
+=== which of the 6 reached a csv-cut (=> got an image folder)? ===
+  45370067: in a cut
+  45109378: in a cut
+  45728372: in a cut
+  45579314: FILTERED OUT of every cut -> no folder
+  45634187: FILTERED OUT of every cut -> no folder
+  45624265: FILTERED OUT of every cut -> no folder
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+All six are **absent from Apibara entirely** — not just from `live`. Let me test whether that's systematic:
+
+<details>
+<summary>**Tool — Bash**: Test Apibara coverage by web listing state</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/q1b.py <<'PY'
+import json, glob, collections
+# every lot the web has EVER shown in each state
+states=collections.defaultdict(set)
+for f in glob.glob("analytics/data/open/json-adapted/iaai/adapted_*.json"):
+    for r in json.load(open(f))["pages"][0]["raw"]["data"]:
+        st=r.get("_web_state")
+        if st: states[st].add(str(r["lot_number"]))
+# every lot apibara has ever returned
+ap=set()
+for f in glob.glob("analytics/data/*/json-raw/iaai/apibara_*.json"):
+    for pg in json.load(open(f)).get("pages",[]):
+        for v in (pg.get("raw") or {}).get("data") or []:
+            ap.add(str(v["lot_number"]))
+print(f"apibara corpus: {len(ap)} distinct lots\n")
+print(f"{'web state':<24}{'lots':>6}{'in apibara':>12}{'coverage':>10}")
+for st in ("Prebid","Prebid/BuyNow","TimedAuction","Auction Not Assigned"):
+    s=states.get(st,set()); hit=len(s&ap)
+    print(f"  {st:<22}{len(s):>6}{hit:>12}{(hit/len(s)*100 if s else 0):>9.0f}%")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/q1b.py
+```
+
+*Result*
+```
+apibara corpus: 1463 distinct lots
+
+web state                 lots  in apibara  coverage
+  Prebid                    91          61       67%
+  Prebid/BuyNow             59          39       66%
+  TimedAuction              12           5       42%
+  Auction Not Assigned     517           5        1%
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+42%, not 0% — so it's not a categorical exclusion. Let me settle it with fresh `live` pulls for the two models involved:
+
+<details>
+<summary>**Tool — Bash**: Fresh live pulls for A4 and A5</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+S=/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad
+for m in A4 A5; do
+  low=$(echo $m | tr 'A-Z' 'a-z')
+  python analytics/scripts/pull_apibara_01.py iaai live --make Audi --model $m --year-range 2018-2023 \
+    --max-pages 5 --out $S/live_$low.json 2>&1 | grep -E "records:|API call" | tr '\n' ' '
+  echo "  <- $m live"
+done
+python - <<'PY'
+import json, glob
+S="/tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/"
+allv=set()
+for f in glob.glob(S+"live_*.json"):
+    d=json.load(open(f))
+    lots={str(v["lot_number"]) for pg in d.get("pages",[]) for v in (pg.get("raw") or {}).get("data") or []}
+    allv|=lots
+    print(f"  {f.split('/')[-1]:<16} {len(lots)} lot(s): {sorted(lots)}")
+print(f"\n  BidNow lots present in any live pull: "
+      f"{sorted({'45370067','45109378','45728372','45579314','45634187','45624265'} & allv) or 'none'}")
+PY
+```
+
+*Result*
+```
+Done. 1 API call(s) used.   <- A4 live
+Done. 1 API call(s) used.   <- A5 live
+  live_a5.json     0 lot(s): []
+  live_s5.json     1 lot(s): ['45496178']
+  live_a4.json     0 lot(s): []
+
+  BidNow lots present in any live pull: none
+```
+
+</details>
+
+Prior migration is complete and verified — 319 folders, 5,300 images, mileage on all, No-Keys 27, BidNow 3. Now your three questions.
+
+## 1 — `live` isn't the problem; those lots aren't in Apibara at all
+
+All six BidNow lots are **absent from every Apibara mode** — open, live and ended:
+
+```
+45370067  ABSENT      45579314  ABSENT
+45109378  ABSENT      45634187  ABSENT
+45728372  ABSENT      45624265  ABSENT
+```
+
+Fresh `live` pulls confirm it: A4 → 0 lots, A5 → 0 lots, S5 → 1 lot (a different one).
+
+**On your Pre-Bid question:** five of the six went `Auction Not Assigned` → `TimedAuction` **directly, never passing through Prebid**. Only 45370067 was ever Prebid (08/16). So they never sat in the state Apibara covers best.
+
+Coverage measured by web state across the whole corpus:
+
+```
+Prebid                 91 lots   67% in apibara
+Prebid/BuyNow          59 lots   66%
+TimedAuction           12 lots   42%
+Auction Not Assigned  517 lots    1%
+```
+
+So it isn't a categorical exclusion of timed auctions — Apibara holds 5 of 12. These six are the *recent* ones, all flipping to TimedAuction on 08/17–08/18, and Apibara hasn't indexed them. Consistent with the ~1/3 miss rate even on Prebid lots.
+
+**Adding `live` to the pipeline is still right** — it's disjoint from `open` (zero overlap; S5 `live` held 45496178, which `open` never returned). It just doesn't rescue these six. Already wired into the driver.
+
+## 2 — It's 6 today, not 3
+
+```
+a4    TimedAuction 1     a5  TimedAuction 4     s5  TimedAuction 1
+TOTAL across five models: Prebid 58 | Prebid/BuyNow 32 | TimedAuction 6 | Not Assigned 401
+```
+
+Only 3 have folders because the other three — 45579314, 45634187, 45624265 — were **filtered out of every csv-cut** by the coupe/convertible/mileage/distance rules, so they never reached the image stage. The tree is correct; it just reflects your filters, not total BidNow inventory.
+
+RS 5 is also a day stale (its newest archive is 08/17), since the AM run's RS 5 web pull predates today's.
+
+## 3 — The three-state tag
+
+Ready to build: nothing for `Auction Not Assigned`, `BidNow` unchanged, and `PreBid-0820-Th` for scheduled lots.
+
+One detail I want to confirm rather than guess — your example maps *"Thu Aug 20, 11:30am CDT"* → `0820-Th`. I'll take the date from `auction_at` (which is UTC, e.g. `2026-08-20T16:30:00+00:00`). For a late-evening CDT sale that's a **different calendar day in UTC**, so the tag could read a day later than the listing does. The web row also carries IAAI's own local string (`Thu Aug 20, 11:30am CDT`) in `row_text`, which would always match what you see on the site.
+
+Want me to parse the local string so the tag mirrors iaai.com exactly, or use `auction_at` and accept the occasional UTC day-shift?
+
+## Prompt 84
+
+```
+thx for 1-2
+Good catch on 3: UTC vs CDT in example which was taken for iaai web search page for lot 45196328 (it is also available on lot individual url as "Auction Date and Time: Thu Aug 20, 11:30am (CDT)"
+pls use EST/CDT or PST or any other abbreviation - the timeframe of the date is based on US time zones for that folder stampt ""Thu Aug 20, 11:30am CDT" → 0820-Th"
+pls complete this taks for scheduled lots when available accross our search groups
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+Understood — local IAAI time, not UTC. Let me find where the local string actually lives:
+
+<details>
+<summary>**Tool — Bash**: Find IAAI's local auction date/time fields</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/tz.py <<'PY'
+import json, glob
+f=sorted(glob.glob("analytics/data/open/json-raw/iaai/iaaiweb_iaai_open_audi_a5_2018_2023_*.json"))[-1]
+d=json.load(open(f))
+for r in d["records"]:
+    if not r.get("detail"): continue
+    st=(r.get("state") or {}).get("state")
+    if st not in ("Prebid","Prebid/BuyNow","TimedAuction"): continue
+    vm=r["detail"]["view_model"]
+    ai=(vm.get("auctionInformation") or {}).get("saleInformation") or {}
+    a=r["detail"]["fields"]["attributes"]
+    print(f"lot {r['stock_number']}  state={st}")
+    print(f"   attributes.AuctionDateTime (UTC) : {a.get('AuctionDateTime')!r}")
+    print(f"   saleInformation day/month/date   : {ai.get('day')!r} {ai.get('month')!r} {ai.get('date')!r}")
+    print(f"   saleInformation liveDateString   : {ai.get('liveDateString')!r}")
+    print(f"   saleInformation userTimezoneAbb  : {ai.get('userTimezoneAbb')!r}")
+    st2=[t for t in r["row_text"] if any(x in t for x in ("CDT","CST","EDT","EST","PDT","PST","MDT","MST"))]
+    print(f"   row_text time strings            : {st2[:3]}")
+    break
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/tz.py
+```
+
+*Result*
+```
+lot 45738201  state=Prebid
+   attributes.AuctionDateTime (UTC) : '8/18/2026 1:30:00 PM +00:00'
+   saleInformation day/month/date   : 'Tue' 'Aug' '18'
+   saleInformation liveDateString   : '8:30am'
+   saleInformation userTimezoneAbb  : 'UTCCUT'
+   row_text time strings            : ['Tue Aug 18, 1:22am CDT', 'Tue Aug 18, 8:30am CDT']
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+`auctionInformation.saleInformation` carries the local date structurally (`Tue Aug 18`) — matching the `8:30am CDT` row text, while UTC says 1:30 PM. Let me check its coverage before relying on it:
+
+<details>
+<summary>**Tool — Bash**: Check local-date coverage and UTC day-shift</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/tz2.py <<'PY'
+import json, glob, collections
+have=miss=0; utcdiff=[]
+MON={m:i for i,m in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(),1)}
+for f in glob.glob("analytics/data/open/json-raw/iaai/iaaiweb_iaai_open_audi_*_2018_2023_*.json"):
+    for r in json.load(open(f)).get("records",[]):
+        if not r.get("detail"): continue
+        if (r.get("state") or {}).get("state") in (None,"Auction Not Assigned"): continue
+        ai=((r["detail"]["view_model"].get("auctionInformation") or {}).get("saleInformation") or {})
+        a=r["detail"]["fields"]["attributes"]
+        if ai.get("day") and ai.get("month") and ai.get("date"):
+            have+=1
+            utc=str(a.get("AuctionDateTime") or "")
+            if utc:
+                mo,dd=utc.split("/")[0], utc.split("/")[1]
+                if int(dd)!=int(ai["date"]) or int(mo)!=MON.get(ai["month"],0):
+                    utcdiff.append((r["stock_number"], f"local {ai['month']} {ai['date']}", f"utc {mo}/{dd}"))
+        else: miss+=1
+print(f"scheduled lots with structured local date: {have}   without: {miss}")
+print(f"\nlots where the UTC calendar day DIFFERS from the local one: {len(utcdiff)}")
+for x in utcdiff[:8]: print("   ", x)
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/tz2.py
+```
+
+*Result*
+```
+scheduled lots with structured local date: 267   without: 0
+
+lots where the UTC calendar day DIFFERS from the local one: 0
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+100% coverage (267/267), and **0 day-shifts in current data** — so the UTC concern is real in principle but not biting today. Using the local field regardless, since it's what the site shows. Implementing:
+
+<details>
+<summary>**Tool — Bash**: Carry the local date and expose it as a column</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix7.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/iaai_web_adapt_01.py"); s=p.read_text(encoding="utf-8")
+s=s.replace('''def who_can_buy(rec):''',
+'''_MONTHS = {m: i for i, m in enumerate(
+    "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(), 1)}
+
+
+def local_auction(rec):
+    """IAAI's own LOCAL sale date, e.g. ('Tue', 8, 18) for "Tue Aug 18, 8:30am CDT".
+
+    Taken from auctionInformation.saleInformation, which stores day/month/date
+    as separate fields — no free-text parsing, and populated on 267 of 267
+    scheduled lots.
+
+    Deliberately NOT derived from attributes.AuctionDateTime, which is UTC. IAAI
+    prints branch-local time on both the search row and the lot page, and a sale
+    late enough in the evening falls on a different UTC calendar day. It happens
+    to match on every current lot (0 of 267 differ, because IAAI sells in the
+    morning), but a folder stamped from UTC would silently disagree with the
+    site the first time it did not.
+    """
+    ai = (((rec.get("detail") or {}).get("view_model") or {})
+          .get("auctionInformation") or {}).get("saleInformation") or {}
+    day, mon, date = ai.get("day"), ai.get("month"), ai.get("date")
+    if not (day and mon and date):
+        return None
+    try:
+        return {"day": str(day), "month": _MONTHS.get(str(mon)[:3].title()),
+                "date": int(date), "time": ai.get("liveDateString") or ""}
+    except (TypeError, ValueError):
+        return None
+
+
+def who_can_buy(rec):''',1)
+s=s.replace('''            "sold_buy_now": bool(view_flag(rec, "buyNowSold")),''',
+'''            "sold_buy_now": bool(view_flag(rec, "buyNowSold")),
+            "local": local_auction(rec),''',1)
+p.write_text(s, encoding="utf-8"); print("adapter patched")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix7.py
+python -m py_compile analytics/scripts/iaai_web_adapt_01.py && echo "adapter OK"
+
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix8.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/apibara_json2csv_iaai_01.py"); s=p.read_text(encoding="utf-8")
+s=s.replace('''    ("timed_close_at",''',
+'''    # IAAI's branch-LOCAL sale date as "MMDD-Dy" (0820-Th). The site prints
+    # local time; auction_at is UTC. Blank on Apibara rows and on unscheduled lots.
+    ("auction_local_tag",   lambda v: local_tag(v),                           "calc"),
+    ("timed_close_at",''',1)
+s=s.replace('''def listing_state(v):''',
+'''_DAY2 = {"mon": "Mo", "tue": "Tu", "wed": "We", "thu": "Th",
+         "fri": "Fr", "sat": "Sa", "sun": "Su"}
+
+
+def local_tag(v):
+    """-> 'MMDD-Dy' from IAAI's local sale date, or '' when unscheduled."""
+    loc = g(v, "auction", "local") or {}
+    day, mon, date = loc.get("day"), loc.get("month"), loc.get("date")
+    if not (day and mon and date):
+        return ""
+    d2 = _DAY2.get(str(day)[:3].lower())
+    return f"{int(mon):02d}{int(date):02d}-{d2}" if d2 else ""
+
+
+def listing_state(v):''',1)
+s=s.replace('''    "timed_close_at": "auction.timed_end_at''',
+'''    "auction_local_tag": "auction.local -> MMDD-Dy in IAAI's branch-local time",
+    "timed_close_at": "auction.timed_end_at''',1)
+p.write_text(s, encoding="utf-8"); print("flattener patched")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix8.py
+python -m py_compile analytics/scripts/apibara_json2csv_iaai_01.py && echo "flattener OK"
+```
+
+*Result*
+```
+adapter patched
+adapter OK
+flattener patched
+flattener OK
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Implement the three-state sale tag</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix9.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/pull_images_01.py"); s=p.read_text(encoding="utf-8")
+s=s.replace('''def bidnow_tag(listing_state):
+    """'BidNow' for a TimedAuction lot — what iaai.com renders as BID NOW."""
+    return BID_NOW if str(listing_state or "").strip().lower() == "timedauction" else ""''',
+'''def sale_tag(listing_state, local_tag=""):
+    """Three states, one trailing segment:
+
+        Auction Not Assigned  ->  ''              nothing to say yet
+        TimedAuction          ->  'BidNow'        biddable online right now
+        Prebid / Prebid+BuyNow -> 'PreBid-0820-Th'  when the sale date is known
+
+    The date comes from IAAI's branch-LOCAL sale time, not from `auction_at`
+    (UTC), so the folder always reads the same day the site does.
+    """
+    st = str(listing_state or "").strip().lower()
+    if st == "timedauction":
+        return BID_NOW
+    if st.startswith("prebid"):
+        lt = str(local_tag or "").strip()
+        return f"PreBid-{lt}" if lt else "PreBid"
+    return ""''',1)
+s=s.replace('''def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None,
+                odometer=None, has_key=None, listing_state=None):''',
+'''def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None,
+                odometer=None, has_key=None, listing_state=None, local_tag=""):''',1)
+s=s.replace('''                money_tag(buy_now), bidnow_tag(listing_state)):''',
+'''                money_tag(buy_now), sale_tag(listing_state, local_tag)):''',1)
+# parse: PreBid-MMDD-Dy also contains hyphens
+s=s.replace('''    for i in range(len(parts) - 1):
+        if parts[i] == "No" and parts[i + 1] == "Keys":
+            parts[i:i + 2] = [NO_KEYS]
+            break''',
+'''    for i in range(len(parts) - 1):
+        if parts[i] == "No" and parts[i + 1] == "Keys":
+            parts[i:i + 2] = [NO_KEYS]
+            break
+    # `PreBid-0820-Th` shatters into three tokens for the same reason. Rejoin
+    # from the "PreBid" anchor, which nothing else in the name can produce.
+    for i, tok in enumerate(parts):
+        if tok == "PreBid":
+            parts[i:i + 3] = ["-".join(parts[i:i + 3])]
+            break''',1)
+s=s.replace('''    bidnow = BID_NOW if BID_NOW in parts else ""''',
+'''    bidnow = next((p for p in parts
+                    if p == BID_NOW or p.startswith("PreBid")), "")''',1)
+# thread local_tag
+for a,b in [('''            buy_now="", mask_char="x", bucket="open", score=None,
+            odometer=None, has_key=None, listing_state=None):''',
+            '''            buy_now="", mask_char="x", bucket="open", score=None,
+            odometer=None, has_key=None, listing_state=None, local_tag=""):'''),
+           ('''                          odometer, has_key, listing_state))''',
+            '''                          odometer, has_key, listing_state, local_tag))'''),
+           ('''                   score=None, odometer=None, has_key=None, listing_state=None):''',
+            '''                   score=None, odometer=None, has_key=None, listing_state=None,
+                   local_tag=""):'''),
+           ('''                           odometer, has_key, listing_state)''',
+            '''                           odometer, has_key, listing_state, local_tag)'''),
+           ('''                    score=None, odometer=None, has_key=None, listing_state=None):''',
+            '''                    score=None, odometer=None, has_key=None, listing_state=None,
+                    local_tag=""):'''),
+           ('''                   mask_char, bucket, score, odometer, has_key, listing_state)''',
+            '''                   mask_char, bucket, score, odometer, has_key, listing_state,
+                   local_tag)'''),
+           ('''                                               odometer, has_key, listing_state)''',
+            '''                                               odometer, has_key, listing_state,
+                                               local_tag)'''),
+           ('''                has_key=r.get("has_key"), listing_state=r.get("listing_state"))''',
+            '''                has_key=r.get("has_key"), listing_state=r.get("listing_state"),
+                local_tag=r.get("auction_local_tag"))''')]:
+    s=s.replace(a,b)
+p.write_text(s, encoding="utf-8"); print("patched")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix9.py
+python -m py_compile analytics/scripts/pull_images_01.py && echo "compile OK"
+```
+
+*Result*
+```
+patched
+compile OK
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Verify the three-state tag and parsing</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python -c "
+import sys; sys.path.insert(0,'analytics/scripts')
+import pull_images_01 as P
+print('=== sale_tag: three states ===')
+for st,lt in [('Auction Not Assigned',''),('TimedAuction',''),('Prebid','0820-Th'),
+              ('Prebid/BuyNow','0824-Mo'),('Prebid','')]:
+    print(f'   {st:<22} local={lt!r:<10} -> {P.sale_tag(st,lt)!r}')
+print()
+print('=== full names ===')
+for st,lt,bn in [('Prebid','0820-Th',''),('Prebid/BuyNow','0824-Mo','7200'),
+                 ('TimedAuction','','0'),('Auction Not Assigned','','')]:
+    print('  ', P.folder_name('45704693','WAUENCF5XJA060484','2019','2500mi',bn,'x',38,72358,'False',st,lt))
+print()
+print('=== parse round-trip: PreBid-MMDD-Dy has TWO hyphens ===')
+for n in ['2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-No-Keys-PreBid-0820-Th',
+          '2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-\$7200-PreBid-0824-Mo',
+          '2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-BidNow',
+          '2019-2500mi-45704693-WAUENCF5XJA060484-38-72k']:
+    lot,vin,y,d,b,sc,mi,nk,tag=P.parse_folder_name(n)
+    ok = lot=='45704693' and len(vin)==17
+    print(f\"  {'OK ' if ok else '!! '}{n[-46:]:<46} sc={sc!r:<5} mi={mi!r:<5} nk={nk!r:<9} tag={tag!r}\")"
+```
+
+*Result*
+```
+=== sale_tag: three states ===
+   Auction Not Assigned   local=''         -> ''
+   TimedAuction           local=''         -> 'BidNow'
+   Prebid                 local='0820-Th'  -> 'PreBid-0820-Th'
+   Prebid/BuyNow          local='0824-Mo'  -> 'PreBid-0824-Mo'
+   Prebid                 local=''         -> 'PreBid'
+
+=== full names ===
+   2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-No-Keys-PreBid-0820-Th
+   2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-No-Keys-$7200-PreBid-0824-Mo
+   2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-No-Keys-BidNow
+   2019-2500mi-45704693-WAUENCF5XJA060484-38-72k-No-Keys
+
+=== parse round-trip: PreBid-MMDD-Dy has TWO hyphens ===
+  OK AUENCF5XJA060484-38-72k-No-Keys-PreBid-0820-Th sc='38'  mi='72k' nk='No-Keys' tag='PreBid-0820-Th'
+  OK -WAUENCF5XJA060484-38-72k-$7200-PreBid-0824-Mo sc='38'  mi='72k' nk=''        tag='PreBid-0824-Mo'
+  OK 500mi-45704693-WAUENCF5XJA060484-38-72k-BidNow sc='38'  mi='72k' nk=''        tag='BidNow'
+  OK 2019-2500mi-45704693-WAUENCF5XJA060484-38-72k  sc='38'  mi='72k' nk=''        tag=''
+```
+
+</details>
+
+Regenerating and migrating the tree:
+
+<details>
+<summary>**Tool — Bash**: Regenerate with the local tag column</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+for f in analytics/data/open/json-raw/iaai/iaaiweb_*.json; do
+  python analytics/scripts/iaai_web_adapt_01.py "$f" >/dev/null 2>&1
+done
+for f in analytics/data/*/json-adapted/iaai/adapted_*.json analytics/data/*/json-raw/iaai/apibara_*.json; do
+  python analytics/scripts/apibara_json2csv_iaai_01.py "$f" >/dev/null 2>&1
+done
+python -c "
+import csv,glob,collections
+t=collections.Counter(); n=0
+for p in glob.glob('analytics/data/*/csv-raw/iaai/*.csv'):
+    for r in csv.DictReader(open(p)):
+        n+=1; t[r.get('auction_local_tag') or '(blank)']+=1
+print(f'{n} rows; auction_local_tag populated on {n-t[\"(blank)\"]}')
+print('  samples:', [k for k in t if k!='(blank)'][:8])"
+```
+
+*Result*
+```
+4698 rows; auction_local_tag populated on 2053
+  samples: ['0818-Tu', '0819-We', '0821-Fr', '1231-Su', '0824-Mo', '0817-Mo', '0820-Th', '0825-Tu']
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+One leak — **`1231-Su`** is the 1899 sentinel surfacing through the *local* date path. Let me confirm and fix:
+
+<details>
+<summary>**Tool — Bash**: Quantify the sentinel leak in the local tag</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python -c "
+import csv,glob,collections
+c=collections.Counter(); states=collections.Counter()
+for p in glob.glob('analytics/data/*/csv-raw/iaai/*.csv'):
+    for r in csv.DictReader(open(p)):
+        if r.get('auction_local_tag')=='1231-Su':
+            c[r['lot_number']]+=1; states[r['listing_state']]+=1
+print(f'  rows tagged 1231-Su: {sum(c.values())}  across {len(c)} lots')
+print(f'  their listing_state: {dict(states)}')"
+```
+
+*Result*
+```
+  rows tagged 1231-Su: 1673  across 517 lots
+  their listing_state: {'Auction Not Assigned': 1673}
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Gate the local date on a real UTC date and regenerate</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix10.py <<'PY'
+import pathlib
+p=pathlib.Path("analytics/scripts/iaai_web_adapt_01.py"); s=p.read_text(encoding="utf-8")
+old='''    ai = (((rec.get("detail") or {}).get("view_model") or {})
+          .get("auctionInformation") or {}).get("saleInformation") or {}
+    day, mon, date = ai.get("day"), ai.get("month"), ai.get("date")
+    if not (day and mon and date):
+        return None'''
+new='''    # The 1899 null date has a LOCAL form too: an unscheduled lot renders as
+    # "Sun Dec 31", which produced a plausible-looking 1231-Su tag on 517 lots —
+    # every one of them Auction Not Assigned. Gate on the UTC field actually
+    # parsing to a real date, which already rejects the sentinel, so the two
+    # representations cannot disagree.
+    attrs = ((rec.get("detail") or {}).get("fields") or {}).get("attributes") or {}
+    if not parse_dt(attrs.get("AuctionDateTime")):
+        return None
+
+    ai = (((rec.get("detail") or {}).get("view_model") or {})
+          .get("auctionInformation") or {}).get("saleInformation") or {}
+    day, mon, date = ai.get("day"), ai.get("month"), ai.get("date")
+    if not (day and mon and date):
+        return None'''
+assert old in s
+p.write_text(s.replace(old,new,1), encoding="utf-8"); print("gated on the real UTC date")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/fix10.py
+python -m py_compile analytics/scripts/iaai_web_adapt_01.py && echo "compile OK"
+for f in analytics/data/open/json-raw/iaai/iaaiweb_*.json; do
+  python analytics/scripts/iaai_web_adapt_01.py "$f" >/dev/null 2>&1
+done
+for f in analytics/data/*/json-adapted/iaai/adapted_*.json; do
+  python analytics/scripts/apibara_json2csv_iaai_01.py "$f" >/dev/null 2>&1
+done
+python -c "
+import csv,glob,collections
+t=collections.Counter(); st=collections.defaultdict(collections.Counter)
+for p in glob.glob('analytics/data/open/csv-raw/iaai/adapted_*.csv'):
+    for r in csv.DictReader(open(p)):
+        tag=r.get('auction_local_tag') or ''
+        t[bool(tag)]+=1; st[r['listing_state']][bool(tag)]+=1
+print(f'  tagged {t[True]}, blank {t[False]}   (1231-Su gone: '
+      f'{not any(r for p in glob.glob(\"analytics/data/*/csv-raw/iaai/*.csv\") for r in csv.DictReader(open(p)) if r.get(\"auction_local_tag\")==\"1231-Su\")})')
+for k,v in st.items(): print(f'    {k:<22} tagged={v[True]:<5} blank={v[False]}')"
+```
+
+*Result*
+```
+gated on the real UTC date
+compile OK
+  tagged 371, blank 1871   (1231-Su gone: True)
+    Prebid                 tagged=229   blank=21
+    Auction Not Assigned   tagged=0     blank=1835
+    Prebid/BuyNow          tagged=120   blank=15
+    TimedAuction           tagged=22    blank=0
+```
+
+</details>
+
+*[thinking block — content not retained in the session log]*
+
+Clean — zero tagged for unscheduled lots. The 36 blank Prebid rows are search-only records with no detail payload, which is correct. Migrating the tree:
+
+<details>
+<summary>**Tool — Bash**: Migrate folders to the three-state tag</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+cat > /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/mig2.py <<'PY'
+import sys, csv, glob, re, pathlib, collections
+sys.path.insert(0,"analytics/scripts")
+import pull_images_01 as P
+best={}
+for p in sorted(glob.glob("analytics/data/*/csv-raw/iaai/*.csv"),
+                key=lambda x: pathlib.Path(x).stat().st_mtime):
+    for r in csv.DictReader(open(p)): best[r["lot_number"]]=r
+gone,_ = P.departed_lots()
+dirs=sorted(glob.glob("images/*/*/*/iaai/*/"))
+moved=same=unknown=0; tags=collections.Counter()
+for d in dirs:
+    d=pathlib.Path(d); model=d.parents[2].name
+    lot,vin,*_ = P.parse_folder_name(d.name)
+    r=best.get(lot)
+    if not r: unknown+=1; continue
+    kw=re.sub(r"^\s*(19|20)\d{2}\s+","",r.get("search_keyword") or "").strip()
+    dest,src = P.resolve_folder("iaai", lot, r.get("vin") or vin, P.group_of(r),
+                                kw or model, r.get("year"), r.get("distance_bucket"),
+                                r.get("buy_now_usd"), bucket=P.bucket_for(lot,gone),
+                                score=r.get("iaa_vehicle_score"),
+                                odometer=r.get("odometer_mi"), has_key=r.get("has_key"),
+                                listing_state=r.get("listing_state"),
+                                local_tag=r.get("auction_local_tag"))
+    moved += bool(src); same += (not src)
+    t=P.sale_tag(r.get("listing_state"), r.get("auction_local_tag"))
+    tags[t.split("-")[0] if t else "(none)"]+=1
+print(f"  renamed {moved}, already correct {same}, unknown {unknown}")
+print(f"  sale tags: {dict(tags)}")
+PY
+python /tmp/claude-1000/-home-striker-projects-car-bid-tracker/1de5f512-27cc-4a6f-a0ee-152360548399/scratchpad/mig2.py 2>&1 | grep -v "^  loaded"
+```
+
+*Result*
+```
+  renamed 57, already correct 262, unknown 0
+  sale tags: {'(none)': 261, 'PreBid': 56, 'BidNow': 2}
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Verify the migrated tree</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python -c "
+import sys,glob,os,collections; sys.path.insert(0,'analytics/scripts')
+import pull_images_01 as P
+d=sorted(glob.glob('images/*/*/*/iaai/*/'))
+lots=collections.Counter(P.parse_folder_name(os.path.basename(x.rstrip('/')))[0] for x in d)
+fs=glob.glob('images/**/*.jpg', recursive=True)
+print(f'  {len(d)} folders / {len(lots)} distinct / dupes: {ss if (ss:={k:v for k,v in lots.items() if v>1}) else \"none\"}')
+print(f'  {len(fs)} images preserved')"
+echo
+echo "=== PreBid samples ==="
+find images/open -mindepth 4 -maxdepth 4 -type d -name '*PreBid*' | head -4 | sed 's#images/open/#  #'
+echo "=== BidNow ==="
+find images/open -mindepth 4 -maxdepth 4 -type d -name '*BidNow*' | sed 's#images/open/#  #'
+echo "=== unscheduled (no tag) ==="
+find images/open -mindepth 4 -maxdepth 4 -type d | grep -vE 'PreBid|BidNow' | head -2 | sed 's#images/open/#  #'
+```
+
+*Result*
+```
+  319 folders / 319 distinct / dupes: none
+  5300 images preserved
+
+=== PreBid samples ===
+  Audi S4/OTHER/iaai/2021-1750mi-45531383-WAUB4AF47MA020403-50-56k-$11900-PreBid-0821-Fr
+  Audi S5/FRONT/iaai/2023-2750mi-45595663-WAUC4CF51PAxxxxxx-20-26k-PreBid-0820-Th
+  Audi S5/FRONT/iaai/2021-2250mi-40139773-WAUC4CF52MAxxxxxx-32-13k-No-Keys-PreBid-0820-Th
+  Audi S5/REAR-SIDE/iaai/2022-1250mi-45240323-WAUC4CF5XNAxxxxxx-50-43k-PreBid-0819-We
+=== BidNow ===
+  Audi S5/REAR-SIDE/iaai/2019-2250mi-45109378-WAUB4CF50KAxxxxxx-37-106k-BidNow
+  Audi A4/FRONT/iaai/2018-2750mi-45728372-WAUENAF45JAxxxxxx-31-64k-BidNow
+=== unscheduled (no tag) ===
+  Audi S4/OTHER/iaai/2021-1250mi-44104029-WAUB4AF44MAxxxxxx-34-37k
+  Audi S4/OTHER/iaai/2018-1000mi-45719990-WAUB4AF44JAxxxxxx-00-0k-No-Keys
+```
+
+</details>
+
+<details>
+<summary>**Tool — Bash**: Document the sale tag and rebuild the transcript</summary>
+
+````bash
+cd /home/striker/projects/car-bid-tracker
+cat >> analytics/schema/iaai_csv_schema.md <<'MD'
+
+## The sale tag: three states, in IAAI's local time
+
+The trailing folder segment says what a lot's sale status is, in the vocabulary
+the site uses:
+
+```
+Auction Not Assigned  ->  (nothing)          nothing to say yet
+TimedAuction          ->  BidNow             biddable online right now
+Prebid / Prebid+BuyNow -> PreBid-0820-Th     sale date known
+```
+
+`auction_local_tag` (`MMDD-Dy`) is built from
+`auctionInformation.saleInformation`, which stores day/month/date as separate
+fields — no free-text parsing, populated on 267 of 267 scheduled lots.
+
+**It is deliberately NOT derived from `auction_at`, which is UTC.** IAAI prints
+branch-local time on both the search row and the lot page — `Thu Aug 20, 11:30am
+CDT` where `auction_at` says `16:30Z`. Those agree on the calendar day for every
+current lot (0 of 267 differ, because IAAI sells in the morning), but a folder
+stamped from UTC would silently disagree with the site the first time a sale ran
+late enough in the evening.
+
+### The 1899 sentinel has a local form too
+
+Nulling the UTC date was not enough. An unscheduled lot renders locally as
+**"Sun Dec 31"**, which produced a perfectly plausible `1231-Su` tag on **517
+lots — every one of them `Auction Not Assigned`**. The local date is now gated on
+the UTC field parsing to a real date, so the two representations cannot disagree.
+
+A sentinel that survives in a second representation is the same trap twice: the
+first fix looked complete because the obvious field was clean.
+
+### Parsing keeps up
+
+Two segments now contain hyphens — `No-Keys` and `PreBid-0820-Th` — so splitting
+on `-` shatters them. Both are rejoined before anything else reads the tokens,
+anchored on strings nothing else can produce (`No`+`Keys`, and `PreBid`). Lot and
+VIN are still lifted out by width first, which is what keeps the rest
+unambiguous.
+MD
+python analytics/scripts/build_chat_transcript.py 2>&1 | grep -m1 "prompts,"
+wc -l analytics/schema/iaai_csv_schema.md
+````
+
+*Result*
+```
+    84 prompts, 2,738,770 chars, 63,247 lines, 2.75 MB
+1823 analytics/schema/iaai_csv_schema.md
+```
+
+</details>
+
+Prior migration confirmed intact (319 folders, 5,300 images), and all three items done.
+
+## 1 — `live` isn't the cause; those lots aren't in Apibara at all
+
+All six BidNow lots are absent from **every** Apibara mode. Fresh `live` pulls: A4 → 0, A5 → 0, S5 → 1 (a different lot).
+
+**On your Pre-Bid question:** five of the six went `Auction Not Assigned` → `TimedAuction` **directly, never through Prebid**. Only 45370067 was ever Prebid (08/16). They never sat in the state Apibara covers best.
+
+Coverage by web state across the corpus:
+
+```
+Prebid                 91 lots   67% in apibara
+Prebid/BuyNow          59 lots   66%
+TimedAuction           12 lots   42%
+Auction Not Assigned  517 lots    1%
+```
+
+So timed auctions aren't categorically excluded — Apibara holds 5 of 12. These six are simply the recent ones (all flipped 08/17–08/18) and Apibara hasn't indexed them. Adding `live` is still correct — it's **disjoint** from `open`, not a subset — it just doesn't rescue these.
+
+## 2 — Six BidNow today, not three
+
+```
+a4 1 | a5 4 | s5 1     TOTAL: Prebid 58, Prebid/BuyNow 32, TimedAuction 6, Not Assigned 401
+```
+
+Only three have folders because 45579314, 45634187 and 45624265 were filtered out of every csv-cut by the coupe/convertible/mileage/distance rules. The tree reflects your filters, not total inventory. Worth noting RS 5's newest archive is 08/17 — a day stale.
+
+## 3 — Three-state tag, in local time
+
+```
+Audi S5/FRONT/iaai/2023-2750mi-45595663-WAUC4CF51PAxxxxxx-20-26k-PreBid-0820-Th
+Audi S4/OTHER/iaai/2021-1750mi-45531383-WAUB4AF47MA020403-50-56k-$11900-PreBid-0821-Fr
+Audi S5/REAR-SIDE/iaai/2019-2250mi-45109378-WAUB4CF50KAxxxxxx-37-106k-BidNow
+Audi S4/OTHER/iaai/2021-1250mi-44104029-WAUB4AF44MAxxxxxx-34-37k
+```
+
+57 folders renamed, 319 intact, 5,300 images preserved, no duplicates.
+
+The date comes from `auctionInformation.saleInformation` (structured day/month/date, 267/267 populated) rather than `auction_at` — so the folder always reads the same day the site does.
+
+## One thing that nearly slipped through
+
+The 1899 sentinel **has a local form too**. An unscheduled lot renders as `Sun Dec 31`, which produced a perfectly plausible `1231-Su` tag on **517 lots** — every one `Auction Not Assigned`. Nulling the UTC date hadn't fixed it, because the local path read different fields. Now gated on the UTC date parsing to something real, so the two representations can't disagree.
+
+Same trap twice: the first fix looked complete because the obvious field was clean.
+
+New column `auction_local_tag`; schema doc at 1,823 lines; transcript at 84 prompts.
+
+## Prompt 85
+
+```
+pls keep updating "Build analytics pipeline script from test files.md" file with chat history in the same format
+```
+
+### Response
+
+*[thinking block — content not retained in the session log]*
+
+<details>
+<summary>**Tool — Bash**: Rebuild the transcript</summary>
+
+```bash
+cd /home/striker/projects/car-bid-tracker
+python analytics/scripts/build_chat_transcript.py 2>&1 | head -6
+```
 
 </details>

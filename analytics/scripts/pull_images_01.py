@@ -1,9 +1,9 @@
 """
-Stage 4 — download lot photos for an OPEN csv-cut.
+Stage 4 — download IAAI or Copart lot photos for an OPEN csv-cut.
 
     data_pull_01.py  ->  csv-cut/*.csv
                               |
-                        THIS SCRIPT  ->  images/open/iaai/{lot}-{vin}/*.jpg
+                        THIS SCRIPT  ->  images/open/.../{iaai|copart}/{lot}-.../*.jpg
 
 Complements app/image_pipeline.py rather than replacing it. That module builds
 the SOLD archive: keyed by VIN, bucketed by tier / make-model / distance / month,
@@ -45,7 +45,7 @@ would misread real VINs as masked.
 
 IMAGE URLS
 ----------
-Rebuilt from the two CSV columns, per the resizer anatomy in
+IAAI URLs are rebuilt from two CSV columns, per the resizer anatomy in
 analytics/schema/iaai_csv_schema.md:
 
     f"{iaai_image_url_prefix}{key}&width={W}&height={H}"
@@ -55,6 +55,11 @@ the array rather than a count. `--size` picks the dimensions; the resizer honour
 whatever is asked, so `full` is genuinely full-res (measured: 400x300 -> 32KB,
 845x633 -> 139KB, 2576x1932 -> 854KB on one lot).
 
+Copart has no equivalent resizer key. `copart_image_urls` therefore stores the
+pipe-joined `media.items[].large` URLs verbatim. They are Copart's `_hrs.jpg` or
+`_vhrs.jpg` assets and are used directly by the downloader; `--size` is
+intentionally ignored for Copart.
+
 Re-running is cheap and safe: a file already on disk is skipped, so this is an
 incremental sync, not a re-download.
 """
@@ -63,14 +68,13 @@ import csv
 import datetime as dt
 import re
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-import httpx  # noqa: E402
-
-from app.image_pipeline import _download, _ext  # noqa: E402
+from csv_image_urls import image_urls as csv_image_urls  # noqa: E402
 
 DATA_DIR = ROOT / "analytics" / "data"
 IMAGES_ROOT = ROOT / "images"
@@ -95,6 +99,12 @@ MANIFEST_COLUMNS = [
 # "classified as neither front nor rear/side" are not worth separate folders
 # when the folder's job is to group photos for review.
 DAMAGE_DIRS = ("FRONT", "REAR-SIDE", "OTHER")
+
+
+def _ext(url):
+    """Return a safe image suffix without importing the HTTP stack for dry-runs."""
+    match = re.search(r"\.(jpg|jpeg|png|webp)(?:$|\?)", str(url), re.I)
+    return f".{match.group(1).lower()}" if match else ".jpg"
 
 
 def group_of(row):
@@ -130,6 +140,52 @@ _DIST_SEG = re.compile(r"^(\d+)mi$")
 LOT_LEN = 8
 VIN_LEN = 17
 _SCORE_SEG = re.compile(r"^\d{1,2}$")
+_MILES_SEG = re.compile(r"^(\d+)k$")
+NO_KEYS = "No-Keys"      # NOTE: contains a hyphen; see parse_folder_name
+BID_NOW = "BidNow"
+
+
+def miles_tag(odometer):
+    """72358 -> '72k'. Floored, not rounded — '72k' should never overstate.
+
+    Empty when there is no reading at all. A genuine 0-999 mile lot becomes
+    '0k', which is correct and informative: it is the signature of an
+    inoperable/digital-dash lot where IAAI could not read the odometer.
+    """
+    try:
+        mi = int(float(str(odometer).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return ""
+    return f"{mi // 1000}k" if mi >= 0 else ""
+
+
+def keys_tag(has_key):
+    """'No-Keys' only when the lot is explicitly flagged as having none.
+
+    Silence means "keys present or not stated" — the flag is only added on a
+    definite negative, so its absence never implies a claim.
+    """
+    s = str(has_key).strip().lower()
+    return NO_KEYS if s in ("false", "0", "no", "n") else ""
+
+
+def sale_tag(listing_state, local_tag=""):
+    """Three states, one trailing segment:
+
+        Auction Not Assigned  ->  ''              nothing to say yet
+        TimedAuction          ->  'BidNow'        biddable online right now
+        Prebid / Prebid+BuyNow -> 'PreBid-0820-Th'  when the sale date is known
+
+    The date comes from IAAI's branch-LOCAL sale time, not from `auction_at`
+    (UTC), so the folder always reads the same day the site does.
+    """
+    st = str(listing_state or "").strip().lower()
+    if st == "timedauction":
+        return BID_NOW
+    if st.startswith("prebid"):
+        lt = str(local_tag or "").strip()
+        return f"PreBid-{lt}" if lt else "PreBid"
+    return ""
 
 
 def score_tag(score):
@@ -159,7 +215,8 @@ def dist_tag(bucket):
     return f"{int(m.group(1)):04d}mi" if m else str(bucket or "").strip()
 
 
-def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None):
+def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None,
+                odometer=None, has_key=None, listing_state=None, local_tag=""):
     """[{year}-][{distance}-]{lot}-{vin}[-${buynow}]
 
     Year and distance lead so a listing sorts by age then proximity — the two
@@ -181,12 +238,10 @@ def folder_name(lot, vin, year, dist_bucket, buy_now, mask_char="x", score=None)
     if d:
         parts.append(d)
     parts += [str(lot), vin]
-    sc = score_tag(score)
-    if sc:
-        parts.append(sc)
-    bn = money_tag(buy_now)
-    if bn:
-        parts.append(bn)
+    for tag in (score_tag(score), miles_tag(odometer), keys_tag(has_key),
+                money_tag(buy_now), sale_tag(listing_state, local_tag)):
+        if tag:
+            parts.append(tag)
     return "-".join(parts)
 
 
@@ -208,6 +263,20 @@ def parse_folder_name(name):
     VIN-resolution rename.
     """
     parts = [p for p in str(name).split("-") if p]
+    # `No-Keys` is the one segment containing a hyphen, so splitting shatters it
+    # into "No" + "Keys". Rejoin before anything else looks at the tokens —
+    # neither half can be mistaken for another segment, which is what makes the
+    # repair unambiguous.
+    for i in range(len(parts) - 1):
+        if parts[i] == "No" and parts[i + 1] == "Keys":
+            parts[i:i + 2] = [NO_KEYS]
+            break
+    # `PreBid-0820-Th` shatters into three tokens for the same reason. Rejoin
+    # from the "PreBid" anchor, which nothing else in the name can produce.
+    for i, tok in enumerate(parts):
+        if tok == "PreBid":
+            parts[i:i + 3] = ["-".join(parts[i:i + 3])]
+            break
 
     # Identify by WIDTH first — lot and VIN are fixed-width, so they can be
     # lifted out unambiguously and everything else read from what remains.
@@ -218,18 +287,24 @@ def parse_folder_name(name):
     year = next((p for p in parts if p != lot and _YEAR_SEG.match(p)), "")
     # Whatever short numeric token is left is the score: nothing else in the
     # name is 1-2 characters (year is 4, lot is 8, VIN is 17).
-    used = {lot, vin, dist, bn, year}
+    miles = next((p for p in parts if _MILES_SEG.match(p)), "")
+    nokeys = NO_KEYS if NO_KEYS in parts else ""
+    bidnow = next((p for p in parts
+                    if p == BID_NOW or p.startswith("PreBid")), "")
+    used = {lot, vin, dist, bn, year, miles, nokeys, bidnow}
     score = next((p for p in parts if p not in used and _SCORE_SEG.match(p)), "")
-    return lot, vin, year, dist, bn, score
+    return lot, vin, year, dist, bn, score, miles, nokeys, bidnow
 
 
 BUCKETS = ("open", "sold")
 
 
 def lot_dir(platform, lot, vin, group, model, year="", dist_bucket="",
-            buy_now="", mask_char="x", bucket="open", score=None):
+            buy_now="", mask_char="x", bucket="open", score=None,
+            odometer=None, has_key=None, listing_state=None, local_tag=""):
     return (IMAGES_ROOT / bucket / model / group / platform
-            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char, score))
+            / folder_name(lot, vin, year, dist_bucket, buy_now, mask_char, score,
+                          odometer, has_key, listing_state, local_tag))
 
 
 def existing_dirs(platform, lot, model=None):
@@ -264,7 +339,8 @@ def existing_dirs(platform, lot, model=None):
 
 def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
                    buy_now="", mask_char="x", apply=True, bucket="open",
-                   score=None):
+                   score=None, odometer=None, has_key=None, listing_state=None,
+                   local_tag=""):
     """`apply=False` reports what WOULD happen and touches nothing.
 
     Renaming is a side effect of resolution, which made --dry-run mutate the
@@ -272,12 +348,14 @@ def resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
     being destructive.
     """
     return _resolve_folder(platform, lot, vin, group, model, year, dist_bucket,
-                           buy_now, mask_char, apply, bucket, score)
+                           buy_now, mask_char, apply, bucket, score,
+                           odometer, has_key, listing_state, local_tag)
 
 
 def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
                     buy_now="", mask_char="x", apply=True, bucket="open",
-                    score=None):
+                    score=None, odometer=None, has_key=None, listing_state=None,
+                   local_tag=""):
     """-> (path, moved_from). Keeps ONE folder per lot as knowledge improves.
 
     A lot is identified by its lot number alone — stable across relists — so any
@@ -292,7 +370,8 @@ def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
                          normalise so one tree does not mix `******` and `xxxxxx`
     """
     want = lot_dir(platform, lot, vin, group, model, year, dist_bucket, buy_now,
-                   mask_char, bucket, score)
+                   mask_char, bucket, score, odometer, has_key, listing_state,
+                   local_tag)
 
     for old in existing_dirs(platform, lot):
         if old == want:
@@ -306,7 +385,8 @@ def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
         # facts about today, and a stale Buy Now in a folder name is a lie.
         if not old_masked and new_masked:
             target = want.parent / folder_name(lot, old_vin, year, dist_bucket,
-                                               buy_now, mask_char, score)
+                                               buy_now, mask_char, score,
+                                               odometer, has_key, listing_state, local_tag)
         else:
             target = want
 
@@ -324,19 +404,39 @@ def _resolve_folder(platform, lot, vin, group, model, year="", dist_bucket="",
 
 
 def image_urls(row, size):
-    prefix = (row.get("iaai_image_url_prefix") or "").strip()
-    keys = [k for k in (row.get("iaai_image_keys") or "").split("|") if k.strip()]
-    if not prefix or not keys:
-        return []
     w, h = SIZES[size]
-    return [(k, f"{prefix}{k}&width={w}&height={h}") for k in keys]
+    return csv_image_urls(row, w, h)
 
 
 
 # --------------------------------------------------------------------------
 # archiving lots that have left the listings
 # --------------------------------------------------------------------------
-def archive_sold(platform="iaai", apply=True):
+def departed_lots():
+    """-> {lot_number} that lot_history_01 reports as gone.
+
+    Shared by the archive pass and the download loop ON PURPOSE. They used to
+    disagree: `--history` widens the row set to older archives, so a lot that
+    has left the site is STILL a row in the cut. The archive moved it to sold/,
+    the download loop then resolved it back to open/, and the next model's
+    archive moved it again — a ping-pong that left placement decided by
+    whichever pass happened to run last.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lot_history_01 as HIST
+    import apibara_json2csv_iaai_01 as F
+    paths = HIST.all_archives()
+    if not paths:
+        return {}, {}
+    history = HIST.build_history(F.load_records(paths), paths)
+    return {k for k, v in history.items() if v.get("exit_state") == "gone"}, history
+
+
+def bucket_for(lot, gone):
+    return "sold" if str(lot) in gone else "open"
+
+
+def archive_sold(platform="iaai", apply=True, precomputed=None):
     """Move folders for departed lots from images/open/ to images/sold/.
 
     Photos of a lot that sold are the most valuable thing in the tree — they are
@@ -355,14 +455,9 @@ def archive_sold(platform="iaai", apply=True):
     comes back is found under sold/ and moved to open/ by the next image run
     rather than being downloaded a second time.
     """
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import lot_history_01 as HIST
-    import apibara_json2csv_iaai_01 as F
-
-    paths = HIST.all_archives()
-    if not paths:
+    gone, history = precomputed if precomputed else departed_lots()
+    if not history:
         return [], []
-    history = HIST.build_history(F.load_records(paths), paths)
 
     moved, skipped = [], []
     root = IMAGES_ROOT / "open"
@@ -372,9 +467,9 @@ def archive_sold(platform="iaai", apply=True):
         if not folder.is_dir():
             continue
         lot = parse_folder_name(folder.name)[0]
-        h = history.get(lot)
-        if not h or h.get("exit_state") != "gone":
+        if lot not in gone:
             continue
+        h = history.get(lot) or {}
         # folder is  images/open/{model}/{group}/{platform}/{name}
         model, group = folder.parents[2].name, folder.parents[1].name
         dest = IMAGES_ROOT / "sold" / model / group / platform / folder.name
@@ -418,7 +513,7 @@ def matches(row, args, where):
             raise SystemExit(f"--where column {col!r} is not in the CSV")
         if str(row.get(col) or "").strip().lower() != val:
             return False, col
-    if not (row.get("iaai_image_keys") or "").strip():
+    if not image_urls(row, "xl"):
         return False, "no images"
     return True, ""
 
@@ -451,7 +546,10 @@ def build_arg_parser():
                     help='top folder for this search, e.g. "Audi A5". Defaults '
                          'to the dominant make+model in the CSV, so it matches '
                          'the pull_iaai_web search that produced it')
-    ap.add_argument("--platform", default="iaai")
+    ap.add_argument(
+        "--platform", choices=["iaai", "copart"], default=None,
+        help="output platform folder (default: infer from CSV image columns)",
+    )
     ap.add_argument("--archive-sold", action="store_true",
                     help="before downloading, move folders for lots that have "
                          "left the listings from images/open/ to images/sold/, "
@@ -519,10 +617,19 @@ def resolve_csv(f):
     if p.is_absolute() or p.exists():
         return p
     for b in ("open", "sold"):
-        cand = DATA_DIR / b / "csv-cut" / "iaai" / f
-        if cand.exists():
-            return cand
+        for platform in ("iaai", "copart"):
+            cand = DATA_DIR / b / "csv-cut" / platform / f
+            if cand.exists():
+                return cand
     raise SystemExit(f"csv not found: {f}")
+
+
+def infer_platform(rows, explicit=None):
+    if explicit:
+        return explicit
+    if rows and "copart_image_urls" in rows[0]:
+        return "copart"
+    return "iaai"
 
 
 def main(argv=None):
@@ -533,10 +640,24 @@ def main(argv=None):
     path = resolve_csv(args.csv_file)
 
     rows = list(csv.DictReader(open(path, encoding="utf-8")))
+    platform = infer_platform(rows, args.platform)
     model_folder = args.model_folder or derive_model_folder(rows)
 
+    # One verdict, shared by the archive pass and the download loop below.
+    # Computed even when --archive-sold is off would cost a full history build
+    # on every run, so it stays opt-in; without the flag every row is treated as
+    # open, which is the pre-archive behaviour.
+    gone = set()
     if args.archive_sold:
-        moved, skipped = archive_sold(args.platform, apply=not args.dry_run)
+        if platform != "iaai":
+            raise SystemExit(
+                "--archive-sold is currently IAAI-only because the history "
+                "engine has IAAI-specific listing semantics"
+            )
+        pre = departed_lots()
+        gone = pre[0]
+        moved, skipped = archive_sold(platform, apply=not args.dry_run,
+                                      precomputed=pre)
         verb = "would move" if args.dry_run else "moved"
         print(f"\n  archive: {verb} {len(moved)} departed lot(s) -> images/sold/")
         for src, dest, reason, price in moved[:20]:
@@ -561,11 +682,14 @@ def main(argv=None):
     print(f"  {len(rows)} row(s) in, {len(kept)} match")
     if dropped:
         print(f"  filtered out: {dict(sorted(dropped.items(), key=lambda kv: -kv[1]))}")
-    print(f"  size:   {args.size} ({w}x{h})")
+    if platform == "copart":
+        print("  size:   native Copart _hrs/_vhrs.jpg (--size applies to IAAI only)")
+    else:
+        print(f"  size:   {args.size} ({w}x{h})")
     print(f"  model:  {model_folder}"
           + ("" if args.model_folder else "   (derived from the CSV)"))
     print(f"  target: images/open/{model_folder}/{{{'|'.join(DAMAGE_DIRS)}}}/"
-          f"{args.platform}/{{lot}}-{{vin}}[-{{year}}][-{{dist}}][-{{score}}][-${{buynow}}]/")
+          f"{platform}/{{lot}}-{{vin}}[-{{year}}][-{{dist}}][-{{score}}][-{{mi}}k][-No-Keys][-${{buynow}}][-BidNow]/")
     if not kept:
         raise SystemExit("\nnothing matched the filters")
 
@@ -579,26 +703,38 @@ def main(argv=None):
         print("\n  DRY RUN — nothing downloaded.")
         for r in kept:
             folder, renamed = resolve_folder(
-                args.platform, r["lot_number"], r["vin"], group_of(r),
+                platform, r["lot_number"], r["vin"], group_of(r),
                 model_folder, r.get("year"), r.get("distance_bucket"),
                 r.get("buy_now_usd"), args.mask_char, apply=False,
-                score=r.get("iaa_vehicle_score"))
+                bucket=bucket_for(r["lot_number"], gone),
+                score=r.get("iaa_vehicle_score"), odometer=r.get("odometer_mi"),
+                has_key=r.get("has_key"), listing_state=r.get("listing_state"),
+                local_tag=r.get("auction_local_tag"))
             urls = image_urls(r, args.size)
             note = f"   [would move from {renamed}]" if renamed else ""
             print(f"    {r['lot_number']:<10} {r['year']} {r['model']:<10} "
                   f"{str(r['primary_damage'])[:14]:<15} {len(urls):>3} img  "
-                  f"-> {group_of(r)}/{args.platform}/{folder.name}{note}")
+                  f"-> {group_of(r)}/{platform}/{folder.name}{note}")
         return 0
+
+    # A dry-run only validates selection, folder layout, and URL parsing. Keep
+    # the optional HTTP dependency out of that path so CSV contracts can be
+    # checked in a minimal analytics environment.
+    import httpx
+    from app.image_pipeline import _download
 
     stamp = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     manifest, tot_dl, tot_skip, tot_fail = [], 0, 0, 0
     with httpx.Client(headers={"User-Agent": "car-bid-tracker/1.0 (+analytics)"}) as client:
         for n, r in enumerate(kept, 1):
             folder, renamed = resolve_folder(
-                args.platform, r["lot_number"], r["vin"], group_of(r),
+                platform, r["lot_number"], r["vin"], group_of(r),
                 model_folder, r.get("year"), r.get("distance_bucket"),
                 r.get("buy_now_usd"), args.mask_char,
-                score=r.get("iaa_vehicle_score"))
+                bucket=bucket_for(r["lot_number"], gone),
+                score=r.get("iaa_vehicle_score"), odometer=r.get("odometer_mi"),
+                has_key=r.get("has_key"), listing_state=r.get("listing_state"),
+                local_tag=r.get("auction_local_tag"))
             folder.mkdir(parents=True, exist_ok=True)
             urls = image_urls(r, args.size)
             if args.max_images:
@@ -660,7 +796,7 @@ def main(argv=None):
 
     print("\n" + "=" * 78)
     print(f"Done. {tot_dl} downloaded, {tot_skip} already present, {tot_fail} failed")
-    print(f"  images   -> {IMAGES_ROOT / 'open' / model_folder}/<group>/{args.platform}")
+    print(f"  images   -> {IMAGES_ROOT / 'open' / model_folder}/<group>/{platform}")
     print(f"  manifest -> {man_path}")
     return 0
 

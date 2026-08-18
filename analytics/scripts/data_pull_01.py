@@ -3,11 +3,11 @@ Stage 3 of the analytics pipeline — filtered, enriched CSV for one make/model.
 
     pull_apibara_01.py  ->  raw .json
                               |
-                        apibara_json2csv_{iaai|copart}_01.py   (flatten, 57 key fields incl. distance)
+                        apibara_json2csv_{iaai|copart}_01.py   (platform schema + distance)
                               |
                         THIS SCRIPT  ->  enriched .csv
 
-Offline. Makes no API calls — only pull_apibara_01.py ever spends quota.
+Offline. This script makes no API calls; it regenerates from saved JSON.
 
     python analytics/scripts/data_pull_01.py iaai                     # newest archive
     python analytics/scripts/data_pull_01.py iaai FILE.json ...       # specific ones
@@ -20,7 +20,7 @@ records carry `details: None`, which removes ACV, repair estimate, body style an
 storage coordinates in one go.
 
     iaai    -> apibara_json2csv_iaai_01.py
-    copart  -> apibara_json2csv_copart_01.py   (not written yet)
+    copart  -> apibara_json2csv_copart_01.py
 
 FILTERS (all opt-in, all inherited from the flattener)
 ------------------------------------------------------
@@ -47,12 +47,10 @@ ADDED COLUMNS
                   folder in app/image_pipeline.py, so rows join to the photo
                   archive path.
 
-Distance USED to be computed here and now belongs to the flattener
-(`distance_mi`, `distance_bucket`), because it needs no input from this stage:
-IAAI's own StorageLocationLatitude/Longitude is populated on 154/154 records
-across four pulls, so there is nothing to decide and no fallback to configure.
-Tier is the opposite — it takes an operator decision per archive, which is
-exactly why it stays here.
+Distance belongs to each platform flattener because it needs no stage-3 input.
+IAAI uses its storage coordinates; Copart uses facility coordinates and exposes
+when it falls back to a city/state approximation. Tier is the opposite — it
+takes an operator decision per archive, which is exactly why it stays here.
 """
 import argparse
 import csv
@@ -95,11 +93,7 @@ def load_flattener(platform):
             raise
         raise SystemExit(
             f"No flattener for {platform!r}: analytics/scripts/{mod}.py does "
-            f"not exist yet.\n"
-            f"  Copart needs its own because its payload has `details: None` "
-            f"— no ACV, no repair estimate, no body style, no branch "
-            f"coordinates. See the Copart section of "
-            f"analytics/schema/iaai_csv_schema.md.") from None
+            f"not exist. See analytics/schema/iaai_csv_schema.md.") from None
 
 
 # --------------------------------------------------------------------------
@@ -252,7 +246,8 @@ def build_arg_parser():
     ap.add_argument("--exclude-body-style", action="append", nargs="+",
                     default=[], metavar="STYLE")
     ap.add_argument("--seller-class", action="append", default=[],
-                    choices=["insurance", "dealer", "other", "unknown"])
+                    choices=["insurance", "finance", "dealer", "non_insurance",
+                             "unknown"])
     ap.add_argument("--min-photos", type=int, default=0)
     ap.add_argument("--market", action="append", default=[], metavar="MARKET",
                     help="keep only these markets: unitedstates | canada. "
@@ -281,6 +276,12 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     args = build_arg_parser().parse_args(argv)
     flat = load_flattener(args.platform)
+    if args.history and args.platform != "iaai":
+        raise SystemExit(
+            "--history is currently IAAI-only: lot_history_01.py still uses "
+            "IAAI listing-state and currency semantics. Copart flattening and "
+            "ordinary csv-cut output are supported."
+        )
     added = ENRICHED_COLUMNS + (HIST.HISTORY_COLUMNS if args.history else [])
     columns = list(flat.COLUMNS) + added
 
@@ -307,7 +308,7 @@ def main(argv=None):
                   f"across matching search cohort(s)")
         paths = widened
     print("=" * 78)
-    print(f"{args.platform.upper()} raw JSON -> enriched CSV")
+    print(f"{args.platform.upper()} JSON -> csv-cut")
     print("=" * 78)
     records = flat.load_records(paths)
     if not records:
@@ -364,7 +365,8 @@ def main(argv=None):
         groups.setdefault(dedupe_key(v), []).append(v)
     dupes = sum(len(g) - 1 for g in groups.values())
 
-    by_key = {k: merge_observations(g) for k, g in groups.items()}
+    merge = getattr(flat, "merge_observations", merge_observations)
+    by_key = {k: merge(group) for k, group in groups.items()}
 
     kept, dropped = [], []
     for v in by_key.values():
