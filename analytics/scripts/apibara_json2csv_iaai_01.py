@@ -691,6 +691,10 @@ def keep(v, f):
 
     if f["seller_classes"] and seller_class(v)[0] not in f["seller_classes"]:
         return False, f"seller_class={seller_class(v)[0]}"
+    # data_pull_01 shares one filter dict across both platforms, so without
+    # this an --exclude-seller-class on an IAAI cut would silently do nothing.
+    if seller_class(v)[0] in f.get("exclude_seller_classes", ()):
+        return False, f"seller_class={seller_class(v)[0]} excluded"
 
     # Market, filtered HERE and not only at pull time. `--market us` on
     # pull_iaai_web_01 cannot clean archives written before it existed, and
@@ -914,6 +918,9 @@ def build_arg_parser():
     ap.add_argument("--seller-class", action="append", default=[],
                     choices=["insurance", "dealer", "other", "unknown"],
                     help="keep only these seller classes (repeatable)")
+    ap.add_argument("--exclude-seller-class", action="append", default=[],
+                    choices=["insurance", "dealer", "other", "unknown"],
+                    help="drop these seller classes (exclusion beats inclusion)")
     ap.add_argument("--min-photos", type=int, default=0,
                     help="drop lots with fewer thumbnails than this")
     ap.add_argument("--market", action="append", default=[], metavar="MARKET",
@@ -987,6 +994,7 @@ def main(argv=None):
         "body_styles": style_set(args.body_style),
         "exclude_body_styles": style_set(args.exclude_body_style),
         "seller_classes": set(args.seller_class),
+        "exclude_seller_classes": set(args.exclude_seller_class),
         "min_photos": args.min_photos,
         "sold_only": args.sold_only,
         "markets": {m.strip().lower() for m in args.market},

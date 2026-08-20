@@ -95,6 +95,19 @@ def money_num(value):
     return float(match.group(0).replace(",", "")) if match else None
 
 
+def money_num_with_zero(value):
+    """Numeric money that preserves an observed zero (not valid for Buy Now)."""
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value >= 0 else None
+    match = re.search(r"-?\d[\d,]*(?:\.\d+)?", str(value))
+    if not match:
+        return None
+    result = float(match.group(0).replace(",", ""))
+    return result if result >= 0 else None
+
+
 def ratio(numerator, denominator):
     return round(numerator / denominator, 4) if numerator and denominator else None
 
@@ -120,6 +133,11 @@ def copart_csv(v):
     return g(v, "enrichment", "copart_sales_csv", default={}) or {}
 
 
+def copart_web(v):
+    """Auditable public-web values retained by copart_web_adapt_01."""
+    return g(v, "enrichment", "copart_web", default={}) or {}
+
+
 def first(data, *keys):
     for key in keys:
         value = clean(data.get(key)) if isinstance(data, dict) else None
@@ -138,6 +156,10 @@ def currency(v):
 def usd(v, value):
     """Return a number only for positively identified US lots."""
     return money_num(value) if currency(v) == "USD" else None
+
+
+def usd_with_zero(v, value):
+    return money_num_with_zero(value) if currency(v) == "USD" else None
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +191,15 @@ def seller_detail(v):
     on the 2018-2023 Audi S5 ended cohort it called *Csaa* non_insurance/unknown
     and *Santander*, *Bridgecrest Acceptance* and *Gmfinancials* non_insurance.
     See copart_seller for the evidence and the registry.
+
+    An upstream stage that already resolved the seller wins outright. Without
+    this the flattener silently re-derives from seller.name/seller.type and
+    discards the whole enrichment: a stat.vin `dealer` verdict, which exists
+    precisely so those lots can be excluded, would never reach the filter.
     """
+    resolved = g(v, "seller", "classification")
+    if isinstance(resolved, dict) and resolved.get("class") in copart_seller.CLASSES:
+        return resolved
     return copart_seller.classify(
         clean(g(v, "seller", "name")), clean(g(v, "seller", "type")), source="seller.name"
     )
@@ -197,6 +227,19 @@ def listing_state(v):
     if mode == "open":
         return "Open"
     return state or None
+
+
+def bid_condition(v):
+    """Human-readable Copart bid condition without losing the raw fields."""
+    bid_type = clean(g(v, "auction", "bid_type"))
+    reserve_met = as_bool(g(v, "auction", "seller_reserve_met"))
+    normalized = re.sub(r"[^a-z]+", " ", str(bid_type or "").casefold()).strip()
+    if normalized == "minimum bid":
+        if reserve_met is True:
+            return "Minimum Bid: Seller reserve met"
+        if reserve_met is False:
+            return "Minimum Bid: Seller reserve not yet met"
+    return bid_type
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +319,17 @@ def vpic_error_codes(v):
 
 def csv_acv(v):
     data = copart_csv(v)
-    return money_num(first(data, "estimated_retail_value", "retail_value", "acv_usd", "acv"))
+    # Estimated Retail Value is not ACV. Only an explicitly ACV-labelled
+    # member-feed field may populate acv_usd.
+    return money_num(first(data, "acv_usd", "acv"))
+
+
+def estimated_retail(v):
+    direct = money_num(g(v, "pricing", "estimated_retail_value_usd"))
+    if direct is not None:
+        return direct
+    data = copart_csv(v)
+    return money_num(first(data, "estimated_retail_value", "retail_value"))
 
 
 def csv_repair(v):
@@ -339,13 +392,24 @@ SCHEMA = [
 
     # money. Native values are retained for Canada; *_usd is strictly US.
     ("last_sold_price_native", lambda v: money_num(g(v, "pricing", "last_sold_price_usd")), "calc"),
-    ("current_bid_native", lambda v: money_num(g(v, "pricing", "current_bid_usd")), "calc"),
+    ("current_bid_native",
+     lambda v: money_num_with_zero(g(v, "pricing", "current_bid_usd")), "calc"),
     ("buy_now_native", lambda v: money_num(g(v, "pricing", "buy_now_usd")), "calc"),
+    ("estimated_retail_value_native",
+     lambda v: estimated_retail(v), "calc"),
     ("last_sold_price_usd", lambda v: usd(v, g(v, "pricing", "last_sold_price_usd")), "calc"),
-    ("current_bid_usd", lambda v: usd(v, g(v, "pricing", "current_bid_usd")), "calc"),
+    ("current_bid_usd",
+     lambda v: usd_with_zero(v, g(v, "pricing", "current_bid_usd")), "calc"),
     ("buy_now_usd", lambda v: usd(v, g(v, "pricing", "buy_now_usd")), "calc"),
+    ("estimated_retail_value_usd",
+     lambda v: usd(v, estimated_retail(v)), "calc"),
     ("acv_usd", lambda v: usd(v, csv_acv(v)), "calc"),
     ("est_repair_usd", lambda v: usd(v, csv_repair(v)), "calc"),
+    # Raw candidate fields remain visible without asserting unverified
+    # semantics. `la` is mapped above only because the Copart UI/CSV labels it
+    # ERV; lotPlugAcv and rc still need a first-party/member-feed contract.
+    ("copart_lot_plug_acv_raw", lambda v: money_num(copart_web(v).get("lotPlugAcv")), "raw"),
+    ("copart_rc_raw", lambda v: money_num(copart_web(v).get("rc")), "raw"),
     ("repair_to_acv", lambda v: ratio(csv_repair(v), csv_acv(v)), "calc"),
     ("sold_to_acv", lambda v: ratio(
         money_num(g(v, "pricing", "last_sold_price_usd")), csv_acv(v)), "calc"),
@@ -358,11 +422,17 @@ SCHEMA = [
     ("last_sold_day", lambda v: g(v, "auction", "last_sold_day"), "raw"),
     ("last_sold_status", lambda v: g(v, "auction", "last_sold_status"), "raw"),
     ("listing_state", listing_state, "calc"),
+    ("bid_type", lambda v: clean(g(v, "auction", "bid_type")), "raw"),
+    ("sale_status_raw", lambda v: clean(g(v, "auction", "sale_status")), "raw"),
+    ("seller_reserve_met",
+     lambda v: as_bool(g(v, "auction", "seller_reserve_met")), "raw"),
+    ("bid_condition", bid_condition, "calc"),
     ("is_timed", lambda v: as_bool(g(v, "auction", "is_timed")), "raw"),
     ("is_buy_now", lambda v: as_bool(g(v, "auction", "is_buy_now")), "raw"),
     ("buy_now_sold", lambda v: as_bool(g(v, "auction", "sold_buy_now")), "raw"),
     ("sold_timed", lambda v: as_bool(g(v, "auction", "sold_timed")), "raw"),
     ("sublot", lambda v: as_bool(v.get("subLot")), "raw"),
+    ("auction_item_number", lambda v: g(v, "auction", "item_number"), "raw"),
 
     # seller and location
     ("seller_name", lambda v: clean(g(v, "seller", "name")), "raw"),
@@ -414,6 +484,10 @@ SOURCE_HINTS = {
     "make": "make", "model": "model", "trim": "vehicle_specs.trim (vPIC fill)",
     "series": "vehicle_specs.series (vPIC fill)", "listing_title": "title",
     "lot_url": "https://www.copart.com/lot/{lot_number}",
+    "bid_type": "auction.bid_type (Copart ess)",
+    "sale_status_raw": "auction.sale_status (dynamicLotDetails.saleStatus)",
+    "seller_reserve_met": "auction.seller_reserve_met",
+    "bid_condition": "derived from bid_type + seller_reserve_met",
     "market": "derived from location.display region", "currency": "USD/CAD from market",
     "body_style": "vehicle_specs.body_style", "doors": "vehicle_specs.doors",
     "vehicle_type": "vehicle_specs.vehicle_type", "manufacturer": "vehicle_specs.manufacturer",
@@ -436,11 +510,18 @@ SOURCE_HINTS = {
     "last_sold_price_native": "pricing.last_sold_price_usd as supplied; currency column applies",
     "current_bid_native": "pricing.current_bid_usd as supplied; currency column applies",
     "buy_now_native": "pricing.buy_now_usd as supplied; currency column applies",
+    "estimated_retail_value_native":
+        "pricing.estimated_retail_value_usd (`la`) as supplied; currency applies",
     "last_sold_price_usd": "native price only when market=UnitedStates",
     "current_bid_usd": "native bid only when market=UnitedStates",
     "buy_now_usd": "native buy-now only when market=UnitedStates",
-    "acv_usd": "future enrichment.copart_sales_csv estimated retail value",
+    "estimated_retail_value_usd":
+        "Copart web `la`, verified as seller-submitted Estimated Retail Value; US only",
+    "acv_usd": "future enrichment.copart_sales_csv explicit ACV only (never ERV)",
     "est_repair_usd": "future enrichment.copart_sales_csv repair estimate",
+    "copart_lot_plug_acv_raw":
+        "enrichment.copart_web.lotPlugAcv; semantics intentionally unasserted",
+    "copart_rc_raw": "enrichment.copart_web.rc; semantics intentionally unasserted",
     "repair_to_acv": "est_repair_usd / acv_usd", "sold_to_acv": "sale / acv",
     "apibara_estimated_cost_from": "pricing.estimated_cost.from (APIBara label retained)",
     "apibara_estimated_cost_to": "pricing.estimated_cost.to (APIBara label retained)",
@@ -449,10 +530,11 @@ SOURCE_HINTS = {
     "last_sold_status": "auction.last_sold_status", "listing_state": "derived from mode/auction",
     "is_timed": "auction.is_timed", "is_buy_now": "auction.is_buy_now",
     "buy_now_sold": "auction.sold_buy_now", "sold_timed": "auction.sold_timed",
-    "sublot": "subLot", "seller_name": "seller.name",
+    "sublot": "subLot", "auction_item_number": "auction.item_number (`aan`)",
+    "seller_name": "seller.name",
     "seller_class": "copart_seller.classify: registry/name > seller.type",
     "seller_class_basis": "which classifier rule fired",
-    "seller_identity_withheld": "class known but company not (APIBara placeholder name)",
+    "seller_identity_withheld": "company identity absent (APIBara placeholder name)",
     "seller_type": "seller.type (raw; unreliable — see seller_class)",
     "selling_branch": "location.display",
     "branch_state": "region parsed from location.display", "branch_zip": "facility.zip",
@@ -483,6 +565,26 @@ def norm_style(value):
     return re.sub(r"[\s_-]+", "/", str(value or "").strip().lower())
 
 
+def style_matches(value, selector):
+    """Match exact styles plus the two body families used by final cuts.
+
+    vPIC may report ``Convertible/Cabriolet`` while Copart web reports
+    ``CONVERTIBLE``. Likewise some feeds decorate ``Coupe`` with door-count
+    text. Treat those representations as one family without making unrelated
+    multi-word style filters fuzzy.
+    """
+    style = norm_style(value)
+    wanted = norm_style(selector)
+    if style == wanted:
+        return True
+    tokens = {token for token in re.split(r"[^a-z0-9]+", style) if token}
+    if wanted == "coupe":
+        return "coupe" in tokens
+    if wanted in {"convertible", "cabriolet"}:
+        return bool(tokens & {"convertible", "cabriolet"})
+    return False
+
+
 def market_key(value):
     text = re.sub(r"[^a-z]", "", str(value or "").lower())
     if text in {"us", "usa", "unitedstates", "unitedstatesofamerica"}:
@@ -502,15 +604,24 @@ def keep(v, filters):
     ):
         return False, f"damage!~{'/'.join(filters['include_damage'])}"
 
-    style = norm_style(g(v, "vehicle_specs", "body_style"))
-    if filters["body_styles"] and style not in filters["body_styles"]:
+    raw_style = g(v, "vehicle_specs", "body_style")
+    style = norm_style(raw_style)
+    if filters["body_styles"] and not any(
+        style_matches(raw_style, candidate) for candidate in filters["body_styles"]
+    ):
         return False, f"body_style={style or 'null'}"
-    if style in filters["exclude_body_styles"]:
+    excluded_style = next((
+        candidate for candidate in filters["exclude_body_styles"]
+        if style_matches(raw_style, candidate)
+    ), None)
+    if excluded_style:
         return False, f"body_style={style} excluded"
 
     cls = seller_class(v)
     if filters["seller_classes"] and cls not in filters["seller_classes"]:
         return False, f"seller_class={cls}"
+    if cls in filters["exclude_seller_classes"]:
+        return False, f"seller_class={cls} excluded"
     if filters["markets"] and market_key(market(v)) not in {
         market_key(x) for x in filters["markets"]
     }:
@@ -549,21 +660,78 @@ def _fill_missing(target, source):
             target[key] = copy.deepcopy(value)
 
 
+def observation_key(record):
+    """Cross-source identity: Copart lot number, never the VIN spelling.
+
+    The public web row masks the VIN while APIBara exposes all 17 characters.
+    Including VIN in this key splits one real lot into two rows. The web adapter
+    validates year/make/model/VIN-prefix before it accepts enrichment; stage 2
+    can therefore use Copart's own lot number as the listing identity.
+    """
+    platform = str(record.get("platform") or PLATFORM).casefold()
+    lot = str(record.get("lot_number") or "").strip()
+    if lot.endswith(".0"):
+        lot = lot[:-2]
+    if lot:
+        return platform, "lot", lot
+    vin = str(record.get("vin") or "").strip().upper()
+    return platform, "vin", vin
+
+
+def _full_vin(value):
+    return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", str(value or "").strip().upper()))
+
+
 def merge_observations(observations):
-    """Newest auction state plus the newest available vPIC static enrichment."""
+    """Newest volatile state plus best available cross-source static facts."""
     if len(observations) == 1:
         return observations[0]
     ordered = sorted(observations, key=lambda v: v.get("_pulled_at") or "")
     newest = ordered[-1]
-    enriched = [v for v in ordered if vpic(v)]
-    if not enriched or vpic(newest):
-        return newest
-    richest = enriched[-1]
     merged = copy.deepcopy(newest)
-    _fill_missing(merged.setdefault("vehicle_specs", {}), richest.get("vehicle_specs") or {})
-    merged.setdefault("enrichment", {})["nhtsa_vpic"] = copy.deepcopy(vpic(richest))
-    merged["_adapted_at"] = richest.get("_adapted_at")
-    merged["_raw_source_file"] = richest.get("_raw_source_file")
+
+    # Static blocks only fill gaps. This lets Copart web contribute secondary
+    # damage/coordinates/trim while vPIC contributes doors/HP/manufacturer.
+    for source in ordered:
+        for block in ("vehicle_specs", "condition", "odometer", "sale_document",
+                      "location", "facility"):
+            _fill_missing(merged.setdefault(block, {}), source.get(block) or {})
+
+    # Full VIN strictly improves a masked public VIN; never downgrade it on a
+    # newer web-only observation.
+    full = [v for v in ordered if _full_vin(v.get("vin"))]
+    if full:
+        merged["vin"] = full[-1]["vin"]
+
+    # Prefer a classified/named seller over an absent seller. Name-first
+    # classification remains centralized in copart_seller.
+    def seller_rank(record):
+        detail = seller_detail(record)
+        return (int(detail["class"] != "unknown"),
+                int(bool(detail.get("name"))),
+                int(not detail.get("identity_withheld")))
+
+    seller_source = max(ordered, key=seller_rank)
+    if seller_rank(seller_source) > (0, 0, 0):
+        merged["seller"] = copy.deepcopy(seller_source.get("seller") or {})
+
+    # A matched APIBara observation carries every lot image; a web-only record
+    # carries one thumbnail. Keep the richer list without touching live prices.
+    media_source = max(
+        ordered,
+        key=lambda v: len((v.get("media") or {}).get("items") or []),
+    )
+    if (media_source.get("media") or {}).get("items"):
+        merged["media"] = copy.deepcopy(media_source["media"])
+
+    enriched = [v for v in ordered if vpic(v)]
+    if enriched:
+        richest = enriched[-1]
+        _fill_missing(merged.setdefault("vehicle_specs", {}),
+                      richest.get("vehicle_specs") or {})
+        merged.setdefault("enrichment", {})["nhtsa_vpic"] = copy.deepcopy(vpic(richest))
+        merged["_adapted_at"] = richest.get("_adapted_at")
+        merged["_raw_source_file"] = richest.get("_raw_source_file")
     merged["_merged_from"] = sorted({
         item.get("_source_file") for item in observations if item.get("_source_file")
     })
@@ -701,6 +869,13 @@ def build_arg_parser():
         help="keep only these seller classes; 'other' split into "
              "finance/non_insurance in this version",
     )
+    parser.add_argument(
+        "--exclude-seller-class", action="append", default=[],
+        choices=["insurance", "finance", "dealer", "non_insurance", "unknown"],
+        help="drop these seller classes. Applied AFTER --seller-class, so an "
+             "exclusion always wins. Unlike --seller-class this does not turn "
+             "into a whitelist, so `unknown` lots survive unless named here",
+    )
     parser.add_argument("--min-photos", type=int, default=0)
     parser.add_argument("--market", action="append", default=[], metavar="MARKET")
     parser.add_argument("--max-odometer", type=int, default=0, metavar="MILES")
@@ -718,6 +893,7 @@ def filters_from_args(args):
         "body_styles": style_set(args.body_style),
         "exclude_body_styles": style_set(args.exclude_body_style),
         "seller_classes": set(args.seller_class),
+        "exclude_seller_classes": set(args.exclude_seller_class),
         "min_photos": args.min_photos,
         "sold_only": args.sold_only,
         "markets": set(args.market),
@@ -747,8 +923,7 @@ def main(argv=None):
 
     groups = {}
     for record in records:
-        key = (record.get("platform"), str(record.get("lot_number") or ""),
-               str(record.get("vin") or "").upper())
+        key = observation_key(record)
         groups.setdefault(key, []).append(record)
     duplicates = sum(len(group) - 1 for group in groups.values())
     merged = [merge_observations(group) for group in groups.values()]

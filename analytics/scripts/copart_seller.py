@@ -20,7 +20,7 @@ note in analytics/schema/iaai_csv_schema.md.
     from copart_seller import classify
     classify(name="Csaa")                      -> class "insurance"
     classify(name="Flagship Credit Impounds")  -> class "finance"
-    classify(published_type="non_insurance")   -> class "non_insurance"
+    classify(published_type="non_insurance")   -> class "unknown"
     classify()                                 -> class "unknown"
 
 WHY THE CLASSES ARE DRAWN THIS WAY
@@ -39,10 +39,11 @@ They are not cosmetic buckets; each implies a different damage story:
     unknown        Copart published nothing.  Never collapse this into
                    non_insurance: absence of evidence is not evidence.
 
-``identity_withheld`` marks the rows where the class is known but the company
-is not — APIBara's literal "Insurance Company" / "Non-insurance Company"
-placeholders.  They are usable for class-level analysis and useless for
-carrier-level analysis, so they are flagged rather than silently mixed in.
+``identity_withheld`` marks generic APIBara placeholders where the company is
+not published. ``Insurance Company`` remains usable at class level. The
+generic ``Non-insurance Company`` assertion is retained as raw evidence but is
+classified ``unknown`` because the open-lot comparison proved it can be a
+false negative.
 """
 from __future__ import annotations
 
@@ -53,9 +54,12 @@ CLASSES = ("insurance", "finance", "dealer", "non_insurance", "unknown")
 # APIBara placeholder names: a class assertion with the identity stripped out.
 PLACEHOLDER_NAMES = {
     "insurance company": "insurance",
-    "non insurance company": "non_insurance",
-    "noninsurance company": "non_insurance",
     "unknown": "unknown",
+}
+
+UNTRUSTED_NON_INSURANCE_NAMES = {
+    "non insurance company",
+    "noninsurance company",
 }
 
 # Curated name -> class.  Keys are normalize() output.  Every entry observed in
@@ -161,9 +165,11 @@ PUBLISHED_TYPE_MAP = {
     "insurance": "insurance",
     "finance": "finance",
     "dealer": "dealer",
-    "non_insurance": "non_insurance",
-    "non-insurance": "non_insurance",
-    "noninsurance": "non_insurance",
+}
+
+UNTRUSTED_NON_INSURANCE_TYPES = {
+    "non_insurance",
+    "noninsurance",
 }
 
 # Copart/APIBara occasionally leak a logo filename into the name field —
@@ -194,15 +200,26 @@ def _pattern_class(key):
     return None
 
 
-def classify(name=None, published_type=None, source=None):
+# Sources whose published type is a positive assertion rather than APIBara's
+# placeholder. The distrust encoded in UNTRUSTED_NON_INSURANCE_TYPES was
+# measured on APIBara's generic "Non-insurance Company" and must not be applied
+# to a source that independently states a type per lot.
+#
+# stat.vin qualifies on evidence: on the first 31-lot Copart A5 cohort its type
+# agreed with Copart's named carrier 9/9, with APIBara's type 16/17, and its
+# full VIN matched Copart's visible prefix 19/19 with zero conflicts.
+TRUSTED_TYPE_SOURCES = {"statvin.search"}
+
+
+def classify(name=None, published_type=None, source=None, trust_published_type=None):
     """Resolve a seller to a class.  Returns a dict, never raises.
 
     Precedence is evidence-ordered, not source-ordered:
 
         1. curated registry hit on the name   (beats any published type)
-        2. APIBara placeholder name           (class known, identity withheld)
+        2. APIBara placeholder name           (identity withheld)
         3. substring patterns on the name
-        4. the upstream published type
+        4. the upstream published type, only when no company name exists
         5. unknown
 
     ``basis`` records which rule fired and ``source`` where the raw value came
@@ -233,13 +250,45 @@ def classify(name=None, published_type=None, source=None):
         })
         return result
 
+    if key in UNTRUSTED_NON_INSURANCE_NAMES:
+        result.update(**{
+            "class": "unknown",
+            "basis": "untrusted_non_insurance",
+            "identity_withheld": True,
+        })
+        return result
+
     if key:
         matched = _pattern_class(key)
         if matched:
             result.update(**{"class": matched, "basis": "name_pattern"})
             return result
 
-    mapped = PUBLISHED_TYPE_MAP.get(re.sub(r"[\s-]+", "_", str(raw_type or "").casefold()))
+        # A real but unfamiliar name is evidence of identity, not business
+        # type. Do not let APIBara's demonstrably unreliable non_insurance
+        # label turn an unregistered carrier or lender into a false negative.
+        result.update(**{"class": "unknown", "basis": "unrecognized_name"})
+        return result
+
+    normalized_type = re.sub(r"[\s-]+", "_", str(raw_type or "").casefold())
+    if trust_published_type is None:
+        trust_published_type = str(source or "") in TRUSTED_TYPE_SOURCES
+    if trust_published_type and normalized_type in UNTRUSTED_NON_INSURANCE_TYPES:
+        result.update(**{
+            "class": "non_insurance",
+            "basis": "trusted_published_type",
+            "identity_withheld": not key,
+        })
+        return result
+    if normalized_type in UNTRUSTED_NON_INSURANCE_TYPES:
+        result.update(**{
+            "class": "unknown",
+            "basis": "untrusted_non_insurance",
+            "identity_withheld": not key,
+        })
+        return result
+
+    mapped = PUBLISHED_TYPE_MAP.get(normalized_type)
     if mapped:
         result.update(**{
             "class": mapped,
@@ -249,10 +298,6 @@ def classify(name=None, published_type=None, source=None):
         })
         return result
 
-    if key:
-        # A real company name we cannot place. It is emphatically not unknown —
-        # Copart published an identity — but we decline to guess the class.
-        result.update(**{"class": "non_insurance", "basis": "unrecognized_name"})
     return result
 
 

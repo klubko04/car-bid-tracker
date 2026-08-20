@@ -40,6 +40,9 @@ class CopartJson2CsvTests(unittest.TestCase):
                 "is_buy_now": False,
                 "sold_buy_now": False,
                 "sold_timed": False,
+                "bid_type": "Minimum Bid",
+                "sale_status": "MINIMUM_BID",
+                "seller_reserve_met": False,
             },
             "condition": {
                 "primary_damage": "Front end",
@@ -61,6 +64,7 @@ class CopartJson2CsvTests(unittest.TestCase):
                 "current_bid_usd": 10200,
                 "buy_now_usd": None,
                 "last_sold_price_usd": 10200,
+                "estimated_retail_value_usd": 21241,
                 "estimated_cost": {"from": 325, "to": 71500, "text": "$325 - $71,500"},
             },
             "sale_document": {
@@ -114,16 +118,24 @@ class CopartJson2CsvTests(unittest.TestCase):
         self.assertEqual(row["engine_hp"], 354)
         self.assertEqual(row["cylinders"], 6)
         self.assertEqual(row["last_sold_price_usd"], 10200)
-        # "Non-insurance Company" is APIBara's placeholder: the class is known,
-        # the company is not. The old vocabulary flattened this to "other"
-        # alongside genuine lender and dealer lots.
-        self.assertEqual(row["seller_class"], "non_insurance")
-        self.assertEqual(row["seller_class_basis"], "placeholder_name")
+        self.assertEqual(row["estimated_retail_value_usd"], 21241)
+        self.assertIsNone(row["acv_usd"])
+        # APIBara's generic non-insurance assertion contradicted Stat.vin on a
+        # live lot, so retain it as evidence but do not treat it as a class.
+        self.assertEqual(row["seller_class"], "unknown")
+        self.assertEqual(row["seller_class_basis"], "untrusted_non_insurance")
         self.assertEqual(row["seller_identity_withheld"], True)
         self.assertEqual(row["primary_damage_group"], "FRONT")
         self.assertEqual(row["vpic_status"], "decoded")
         self.assertEqual(row["copart_video_url"], "https://cs.copart.com/a.mp4")
         self.assertEqual(row["raw_source_file"], "raw.json")
+        self.assertEqual(row["bid_type"], "Minimum Bid")
+        self.assertEqual(row["sale_status_raw"], "MINIMUM_BID")
+        self.assertIs(row["seller_reserve_met"], False)
+        self.assertEqual(
+            row["bid_condition"],
+            "Minimum Bid: Seller reserve not yet met",
+        )
 
     def test_named_lender_beats_apibara_non_insurance_type(self):
         """Santander/Bridgecrest/GM Financial all arrive typed non_insurance."""
@@ -141,6 +153,25 @@ class CopartJson2CsvTests(unittest.TestCase):
         record["seller"] = {}
         row = flat.flatten(record)
         self.assertEqual(row["seller_class"], "unknown")
+
+    def test_coupe_and_convertible_body_families_match_feed_variants(self):
+        self.assertTrue(flat.style_matches("COUPE", "coupe"))
+        self.assertTrue(flat.style_matches("2 Door Coupe", "coupe"))
+        self.assertTrue(flat.style_matches("Convertible/Cabriolet", "convertible"))
+        self.assertTrue(flat.style_matches("CABRIOLET", "convertible"))
+        self.assertFalse(
+            flat.style_matches("Hatchback/Liftback/Notchback", "coupe")
+        )
+
+    def test_member_csv_retail_value_never_leaks_into_acv(self):
+        record = self.record()
+        record["pricing"]["estimated_retail_value_usd"] = None
+        record["enrichment"]["copart_sales_csv"] = {
+            "estimated_retail_value": 22000,
+        }
+        row = flat.flatten(record)
+        self.assertEqual(row["estimated_retail_value_usd"], 22000)
+        self.assertIsNone(row["acv_usd"])
 
     def test_canadian_money_stays_native_not_usd(self):
         record = self.record()
@@ -170,6 +201,15 @@ class CopartJson2CsvTests(unittest.TestCase):
         self.assertEqual(row["last_sold_price_native"], 10200)
         self.assertIsNone(row["last_sold_price_usd"])
 
+    def test_zero_current_bid_is_preserved_but_zero_buy_now_is_blank(self):
+        record = self.record()
+        record["pricing"]["current_bid_usd"] = 0
+        record["pricing"]["buy_now_usd"] = 0
+        row = flat.flatten(record)
+        self.assertEqual(row["current_bid_native"], 0.0)
+        self.assertEqual(row["current_bid_usd"], 0.0)
+        self.assertIsNone(row["buy_now_usd"])
+
     def test_new_raw_observation_keeps_old_vpic_static_data(self):
         adapted = self.record()
         adapted["_pulled_at"] = "2026-08-17T10:00:00+00:00"
@@ -190,6 +230,23 @@ class CopartJson2CsvTests(unittest.TestCase):
         self.assertEqual(flat.vpic(merged)["status"], "decoded")
         self.assertEqual(merged["_source_file"], "new_raw.json")
         self.assertEqual(merged["_raw_source_file"], "raw.json")
+
+    def test_web_masked_and_apibara_full_vin_are_one_lot(self):
+        apibara = self.record()
+        apibara["_pulled_at"] = "2026-08-18T10:00:00+00:00"
+        web = copy.deepcopy(apibara)
+        web["vin"] = "WAUC4CF53JA******"
+        web["_pulled_at"] = "2026-08-18T11:00:00+00:00"
+        web["_source_file"] = "adapted_copartweb.json"
+        web["pricing"]["current_bid_usd"] = 12500
+        web["enrichment"] = {"copart_web": {"seller": {"class": "unknown"}}}
+
+        self.assertEqual(flat.observation_key(apibara), flat.observation_key(web))
+        merged = flat.merge_observations([apibara, web])
+        self.assertEqual(merged["vin"], "WAUC4CF53JA063799")
+        self.assertEqual(merged["pricing"]["current_bid_usd"], 12500)
+        self.assertEqual(flat.vpic(merged)["status"], "decoded")
+        self.assertEqual(merged["_source_file"], "adapted_copartweb.json")
 
     def test_open_archive_main_writes_csv(self):
         record = self.record()

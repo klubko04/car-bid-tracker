@@ -58,21 +58,103 @@ python analytics/scripts/apibara_json2csv_copart_01.py <copart-adapted-archive>.
 python analytics/scripts/data_pull_01.py copart <copart-adapted-archive>.json
 ```
 
+For open inventory, the first-party web pull can be combined with that APIBara
+copy. The join key is the normalized Copart lot number; year/make/model and the
+web VIN prefix must also agree before the adapter copies the full VIN or vPIC
+block. Web bid, Buy Now and auction time remain authoritative because they are
+the fresher observation:
+
+```bash
+python analytics/scripts/pull_copart_web_01.py
+python analytics/scripts/copart_web_adapt_01.py <copartweb-archive>.json \
+  --enrich-from <vpic-apibara-archive>.json --audit
+python analytics/scripts/copart_image_enrich_01.py <adapted-copartweb-archive>.json
+python analytics/scripts/apibara_json2csv_copart_01.py <adapted-copartweb-archive>.json
+python analytics/scripts/data_pull_01.py copart <adapted-copartweb-archive>.json \
+  --history --history-cache
+python analytics/scripts/pull_images_01.py <copart-csv-cut>.csv \
+  --platform copart --archive-sold
+```
+
 The decoder fills missing trim, body class, doors, engine cylinders/horsepower,
 plant and manufacturer fields. It never overwrites APIBara identity or specs;
 conflicts remain attached to the record with provenance. Decodes are cached
 under `analytics/data/cache/nhtsa-vpic/`, so repeat sold/open adaptations make
 no NHTSA request.
 
-The Copart flattener writes the canonical, unfiltered 91-column extract to
+The Copart flattener writes the canonical, unfiltered 96-column extract to
 `csv-raw/copart/`. `data_pull_01.py copart` imports the same mapping but reads
 the JSON again, then adds tier, tier source and sold period while writing
 `csv-cut/copart/`; it does not read the intermediate CSV file.
 
-`copart_image_urls` contains pipe-joined direct Copart `_hrs.jpg`/`_vhrs.jpg`
-assets copied from `media.items[].large`. `pull_images_01.py` detects that
-column, preserves each URL verbatim, and can consume a Copart open-lot csv-cut
-without reconstructing an IAAI resizer URL.
+`copart_image_urls` contains pipe-joined direct Copart URLs. APIBara-matched
+lots already use every `_hrs.jpg`/`_vhrs.jpg` asset from `media.items[].large`.
+For web-only lots, `copart_image_enrich_01.py` prefers Copart's structured
+first-party `lot-images` response captured through the authorized browser
+profile. It separates ordinary photos, 360 panoramas and engine video and
+copies only explicit HTTPS Copart media URLs. The authorized-broker payload is
+the fallback. Neither route guesses a CDN sequence or copies a broker VIN.
+
+Copart history is scope-aware. Complete exact-model Copart web snapshots may
+prove that a lot disappeared; APIBara Open and Live responses are narrower
+state slices and contribute observations but never prove site-wide absence.
+Raw, adapted and image-enriched derivatives sharing one `generated_at` are one
+logical snapshot. Ended APIBara records reconcile the exit price: `Sold` is a
+confirmed result, while `Sold on Approval` is retained as a provisional approval
+bid in `exit_price_source`. If the lot appears active later, history treats it
+as a relist and keeps its images under `images/open`; otherwise
+`--archive-sold` moves the existing folder to the matching `images/sold` tree.
+
+### Repeatable Copart S5/A5 runner
+
+`run_copart_pipeline.sh` owns the proven S5/A5 sequence: six-month APIBara Ended,
+six exact-year Copart web searches, APIBara Open and Live, all three vPIC
+adapters, lot-number enrichment, verified gallery reuse/capture, sold and open
+`csv-raw`, history-enabled `csv-cut`, then the sold/open image lifecycle and
+missing-image download.
+
+```bash
+# Inspect paths, stages and request ceilings; performs no writes or calls.
+analytics/scripts/run_copart_pipeline.sh --dry-run
+
+# Validate/run the higher-volume A5 cohort explicitly.
+analytics/scripts/run_copart_pipeline.sh --model A5 --dry-run
+
+# One production namespace per UTC day. Re-running resumes the same run.
+analytics/scripts/run_copart_pipeline.sh
+
+# Deliberate second snapshot on the same day.
+analytics/scripts/run_copart_pipeline.sh --run-id 20260819T180000Z
+```
+
+The estimated APIBara use is about 17 calls for S5, with a hard cap of 45
+(Ended 25 + Open 10 + Live 10). A5 uses a 50-page Ended cap and estimates
+about 40 calls, with a hard cap of 70; the first complete six-month validation
+used 35 Ended calls for 689 raw records. Copart web normally costs six search requests,
+with a 120-request pagination ceiling. vPIC reports cache misses divided into
+batches of 50. Gallery cost is printed after prior verified media are reused;
+only still-incomplete lots open in the dedicated signed-in browser. Its
+thumbnail pacing remains 1.25 seconds.
+
+Each stage writes an explicit timestamped artifact and receives a `.done`
+checkpoint only after both its process and artifact validation succeed. HTTP
+errors, truncation, failed web queries, Canada leakage, duplicate CSV lots,
+incomplete galleries, or failed image downloads stop the run. Resume with the
+same run ID: valid stages skip, cached vPIC results and gallery URLs are reused,
+existing images are not downloaded again, and same-CSV manifest rows are
+replaced rather than duplicated. The runner fails before making API calls if
+its Python interpreter cannot import the declared `httpx` dependency; activate
+the environment installed from `requirements.txt`, or set
+`COPART_PIPELINE_PYTHON=/path/to/python`. State, per-stage logs and the final
+artifact manifest live under `analytics/data/runs/copart/{s5|a5}/<run-id>/` and
+are ignored by git. The runner rejects models outside 2018–2023 Audi S5/A5;
+A4/S4/RS5 remain deferred.
+
+Copart bid conditions are retained independently from the current bid:
+`bid_type` carries Copart's visible `Pure Sale`, `Minimum Bid`, `On Approval`,
+or `Not On Sale`; `seller_reserve_met` carries the live reserve flag; and
+`bid_condition` renders combinations such as
+`Minimum Bid: Seller reserve not yet met`. History records condition changes.
 
 ### Copart web open-lot capture
 
@@ -89,19 +171,21 @@ python analytics/scripts/pull_copart_web_01.py
 python analytics/scripts/pull_copart_web_01.py --details --max-details 5   # diagnostic only
 ```
 
-The August 17, 2026 run found 74 exact open S5 lots (45/16/2/7/2/2 for
-2018–2023) in six requests: 72 U.S. and 2 Canadian (Edmonton, Montreal).
+The August 18, 2026 run found 71 exact open S5 lots (45/13/2/7/2/2 for
+2018–2023) in six requests: 70 U.S. and 1 Canadian.
 Market filtering still belongs at the adapter boundary — Canadian/unknown rows
 must remain auditable in json-raw but must not reach adapted JSON or either CSV
 layer.
 
 **Seller comes from the search row, at no extra cost.** Copart ships the seller
-company name in `scn`: 18 of 74 rows (25%), every one a carrier (GEICO 10,
-USAA 5, CSAA 1, Bristol West 1, Farmers 1). `showSeller` is a *display* flag and
-not a presence test — 14 of those 18 rows have `scn` while `showSeller` is
-false. Copart publishes no seller *type* anywhere and has no seller facet, so
-class is inferred from the name by `analytics/scripts/copart_seller.py`.
-Absence stays `unknown` and never becomes `non_insurance`.
+company name in `scn`: 16 of 71 rows in the August 18 pull, all carriers.
+`showSeller` is a *display* flag and not a presence test. Copart publishes no
+seller *type* anywhere and has no seller facet, so the canonical `seller_class`
+is inferred from the name by `analytics/scripts/copart_seller.py`. The classes
+are `insurance`, `finance`, `dealer`, `non_insurance` (other commercial
+consignors such as CarBrain), and `unknown`. `seller_type` remains the raw
+upstream value for provenance. Absence or an unfamiliar name stays `unknown`
+and never becomes `non_insurance` merely by default.
 
 **`--details` is a contract probe, not a data path.** The lot-details endpoint
 returns the same Solr document as the search row (111 identical keys) minus
@@ -111,9 +195,12 @@ against 67 Imperva failures (45 served as HTTP 200, 22 as 403), and the
 lot-page HTML fallback was blocked on every row. Keep it out of scheduled runs.
 
 **VINs are masked** — `fv` arrives as `WAUB4CF52JA******` on every row, in both
-search and detail responses. This source therefore cannot feed
-`copart_vpic_adapt_01.py` and cannot be VIN-joined to an APIBara pull; its lots
-are keyed by lot number alone.
+search and detail responses. This source cannot feed `copart_vpic_adapt_01.py`
+directly. `copart_web_adapt_01.py` joins it to a full-VIN APIBara/vPIC archive
+by lot number and validates identity before enrichment. In the August 18 pull,
+all 8 APIBara open lots existed among the 70 U.S. web lots, and all 8 masked VIN
+prefixes agreed; the other 62 U.S. web lots remain honestly masked and
+vPIC-unenriched (but can receive complete media through the P4 image stage).
 
 ## Clean-value auto-fill
 
@@ -133,7 +220,7 @@ All figures are estimates — platforms change fees; verify before bidding. Ever
 
 Most `test/*.py` files are standalone scripts that make **live** APIBara calls
 to pin down the API's real field shapes and write raw JSON to `test_run/`
-(gitignored). Each live probe states its 1–2-call cost in its docstring. The two
+(gitignored). Each live probe states its 1–2-call cost in its docstring. The eight
 Copart pipeline regression files are real, zero-network unit tests:
 
 ```bash
@@ -141,6 +228,10 @@ python3 test/test_copart_vpic_adapt_01.py
 python3 test/test_copart_json2csv_01.py
 python3 test/test_pull_copart_web_01.py
 python3 test/test_copart_seller_01.py
+python3 test/test_copart_web_adapt_01.py
+python3 test/test_copart_image_enrich_01.py
+python3 test/test_copart_lot_history_01.py
+python3 test/test_copart_pipeline_runner_01.py
 ```
 
 ```bash
@@ -185,8 +276,10 @@ What these scripts established, verified against 60 live records:
 - `app/copart_csv.py` — Copart member CSV importer
 - `analytics/scripts/copart_vpic_adapt_01.py` — fill-only Copart VIN/spec enrichment with NHTSA vPIC
 - `analytics/scripts/pull_copart_web_01.py` — exact Copart open-lot search archive (seller from `scn`, no quota)
+- `analytics/scripts/copart_web_adapt_01.py` — US-only web normalization + guarded lot-number join to APIBara/vPIC
+- `analytics/scripts/copart_image_enrich_01.py` — complete explicit Copart media from an authorized broker payload
 - `analytics/scripts/copart_seller.py` — shared seller taxonomy: insurance / finance / dealer / non_insurance / unknown
-- `analytics/scripts/apibara_json2csv_copart_01.py` — Copart raw/adapted JSON → 91-column csv-raw
+- `analytics/scripts/apibara_json2csv_copart_01.py` — Copart raw/adapted JSON → 100-column csv-raw
 - `app/auction_api.py` — demo lookup fallback
 - `app/db.py` — SQLite storage (`tracker.db`)
 - `static/index.html` — the UI

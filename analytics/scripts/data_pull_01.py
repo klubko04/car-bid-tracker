@@ -248,6 +248,10 @@ def build_arg_parser():
     ap.add_argument("--seller-class", action="append", default=[],
                     choices=["insurance", "finance", "dealer", "non_insurance",
                              "unknown"])
+    ap.add_argument("--exclude-seller-class", action="append", default=[],
+                    choices=["insurance", "finance", "dealer", "non_insurance",
+                             "unknown"],
+                    help="drop these seller classes (exclusion beats inclusion)")
     ap.add_argument("--min-photos", type=int, default=0)
     ap.add_argument("--market", action="append", default=[], metavar="MARKET",
                     help="keep only these markets: unitedstates | canada. "
@@ -276,12 +280,6 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     args = build_arg_parser().parse_args(argv)
     flat = load_flattener(args.platform)
-    if args.history and args.platform != "iaai":
-        raise SystemExit(
-            "--history is currently IAAI-only: lot_history_01.py still uses "
-            "IAAI listing-state and currency semantics. Copart flattening and "
-            "ordinary csv-cut output are supported."
-        )
     added = ENRICHED_COLUMNS + (HIST.HISTORY_COLUMNS if args.history else [])
     columns = list(flat.COLUMNS) + added
 
@@ -302,7 +300,7 @@ def main(argv=None):
         # History over one archive is trivially empty, so pull in every other
         # snapshot of the same search. Absence is only meaningful within a
         # cohort — see lot_history_01.cohort_key.
-        widened = HIST.expand_to_cohorts(paths)
+        widened = HIST.expand_to_cohorts(paths, args.platform)
         if len(widened) != len(paths):
             print(f"  --history: widened {len(paths)} -> {len(widened)} archive(s) "
                   f"across matching search cohort(s)")
@@ -320,6 +318,7 @@ def main(argv=None):
         "body_styles": flat.style_set(args.body_style),
         "exclude_body_styles": flat.style_set(args.exclude_body_style),
         "seller_classes": set(args.seller_class),
+        "exclude_seller_classes": set(args.exclude_seller_class),
         "min_photos": args.min_photos,
         "sold_only": args.sold_only,
         "markets": {m.strip().lower() for m in args.market},
@@ -338,9 +337,10 @@ def main(argv=None):
         # Apibara `ended` archives are loaded as CONTEXT ONLY — they carry the
         # sale price that iaai.com never publishes, but their lots must not
         # become rows or every sold Lexus lands in an Audi A5 CSV.
-        ctx = HIST.sold_context(exclude=paths)
-        hist_records = records + (flat.load_records(ctx) if ctx else [])
-        history = HIST.build_history(hist_records, list(paths) + ctx)
+        ctx = HIST.sold_context(exclude=paths, platform=args.platform)
+        hist_paths = list(paths) + ctx
+        hist_records = HIST.load_records(hist_paths, args.platform)
+        history = HIST.build_history(hist_records, hist_paths, args.platform)
         relisted = sum(1 for h in history.values() if h["relist_count"])
         priced = sum(1 for h in history.values() if h["exit_price_usd"])
         gone = sum(1 for h in history.values() if h["exit_state"] == "gone")
@@ -385,15 +385,15 @@ def main(argv=None):
     rows = [enrich(v, flat.flatten(v), flat, args.tier, history) for v, _ in kept]
 
     if args.history and args.history_cache:
-        for cohort in {HIST.snapshot_meta(p)["cohort"] for p in paths}:
-            sub = [p for p in paths if HIST.snapshot_meta(p)["cohort"] == cohort]
+        for cohort in {HIST.snapshot_meta(p, args.platform)["cohort"] for p in paths}:
+            sub = [p for p in paths
+                   if HIST.snapshot_meta(p, args.platform)["cohort"] == cohort]
             # Per cohort, from that cohort's records only — see the same guard
             # in lot_history_01.main().
-            files = {HIST.snapshot_meta(p)["file"] for p in sub}
-            recs = [r for r in records if r.get("_source_file") in files]
-            lots = HIST.build_history(recs, sub)
+            recs = HIST.load_records(sub, args.platform)
+            lots = HIST.build_history(recs, sub, args.platform)
             out = HIST.write_cache(lots, sub, cohort,
-                                   records[-1].get("_mode", "open"))
+                                   records[-1].get("_mode", "open"), args.platform)
             print(f"  history cache -> {out}  ({len(lots)} lots)")
 
     # what the enrichment actually produced — a silent 'unknown' bucket or an

@@ -349,5 +349,84 @@ class ArchiveTests(unittest.TestCase):
             self.assertTrue(record["vin_masked"])
 
 
+class ChallengeDetectionTests(unittest.TestCase):
+    def test_interstitial_is_a_challenge(self):
+        self.assertTrue(pull.is_challenge(IMPERVA_BODY))
+
+    def test_real_page_carrying_the_incapsula_script_is_not(self):
+        """Copart embeds the Incapsula script on ordinary pages.
+
+        Matching the marker alone flagged a legitimate 771 KB search page as a
+        challenge, which would have sent every good response down the failure
+        path.
+        """
+        page = ("<html><head><title>Copart</title>"
+                '<script src="/_Incapsula_Resource?SWJIYLWA=1"></script></head>'
+                "<body>" + ("<div>lot</div>" * 5000) + "</body></html>")
+        self.assertGreater(len(page), 20000)
+        self.assertFalse(pull.is_challenge(page))
+
+    def test_json_response_is_not_a_challenge(self):
+        self.assertFalse(pull.is_challenge('{"returnCode":1,"data":{}}'))
+
+
+class BrowserFallbackTests(unittest.TestCase):
+    """The WAF started refusing plain HTTP on 2026-08-20 and six of six yearly
+    queries came back empty. The same form fetched from the browser session
+    returned 14/14 exact lots, so a challenge now falls back instead of
+    failing the whole cohort."""
+
+    def payload(self, rows):
+        return {"returnCode": 1, "returnCodeDesc": "Success",
+                "data": {"query": {"page": 0, "size": 100},
+                         "results": {"totalElements": len(rows), "content": rows,
+                                     "facetFields": [], "spellCheckList": [],
+                                     "suggestions": []}}}
+
+    def run_with(self, browser_result, extra=()):
+        calls = {"http": 0, "browser": 0}
+
+        class Session:
+            def post_form(self, url, form, referer):
+                calls["http"] += 1
+                return 200, IMPERVA_BODY, {"Content-Type": "text/html"}
+
+        def fake_browser(form, referer, timeout=90):
+            calls["browser"] += 1
+            return browser_result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "out.json"
+            with mock.patch.object(pull, "HttpSession", Session), \
+                    mock.patch.object(pull, "browser_post_form", fake_browser), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = pull.main(["--year-range", "2018-2018", "--delay", "0",
+                                  "--out", str(destination), *extra])
+            archive = json.loads(destination.read_text()) if destination.exists() else None
+        return code, archive, calls
+
+    def test_challenge_falls_back_to_the_browser(self):
+        good = (200, json.dumps(self.payload([ROW_NO_SELLER])),
+                {"Content-Type": "application/json"})
+        code, archive, calls = self.run_with(good)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls["http"], 1)
+        self.assertEqual(calls["browser"], 1)
+        self.assertEqual(archive["counts"]["records"], 1)
+        self.assertEqual(archive["queries"][0]["pages"][0]["transport"], "browser")
+
+    def test_fallback_can_be_refused(self):
+        good = (200, json.dumps(self.payload([ROW_NO_SELLER])),
+                {"Content-Type": "application/json"})
+        with self.assertRaises(SystemExit):
+            self.run_with(good, extra=("--no-browser-fallback",))
+
+    def test_browser_challenge_is_not_retried_forever(self):
+        # If the browser session is also unsatisfied, that is a stop condition.
+        blocked = (200, IMPERVA_BODY, {"Content-Type": "text/html"})
+        with self.assertRaises(SystemExit):
+            self.run_with(blocked)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

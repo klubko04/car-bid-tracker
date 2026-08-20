@@ -321,10 +321,14 @@ def apply_us_market_scope(data: dict) -> dict:
 def validate_archive(path: Path, data: dict) -> None:
     platform = str(data.get("platform") or "").lower()
     mode = str(data.get("mode") or "").lower()
-    if str(data.get("source") or "").lower() == "copart-web":
+    if str(data.get("source") or "").lower() in {
+        "copart-web", "copart-web-adapted",
+    }:
         raise ValueError(
-            f"{path.name}: this is a Copart web raw archive, not an APIBara "
-            "archive; run copart_web_adapt_01.py before vPIC enrichment"
+            f"{path.name}: this is a Copart web archive, not an APIBara "
+            "archive; vPIC needs APIBara's full VIN. Enrich the APIBara archive "
+            "first, then pass that vPIC copy to copart_web_adapt_01.py "
+            "--enrich-from"
         )
     if platform != PLATFORM:
         raise ValueError(f"{path.name}: platform is {platform!r}, expected 'copart'")
@@ -502,7 +506,15 @@ def adapt_archive(
     market_scope = apply_us_market_scope(data)
     records = list(archive_records(data))
     valid = {clean_vin(r.get("vin")) for r in records if valid_vin(clean_vin(r.get("vin")))}
-    stats = Counter()
+    # Empty Open/Live slices are valid snapshots. Seed the summary keys so an
+    # empty archive writes a complete zero-valued audit block and the CLI does
+    # not crash while printing it.
+    stats = Counter({
+        "filled_values": 0,
+        "identity_conflicts": 0,
+        "year_mismatches": 0,
+        "decode_errors": 0,
+    })
     for record in records:
         vin = clean_vin(record.get("vin"))
         entry = cache["decodes"].get(vin) if valid_vin(vin) else None

@@ -3,11 +3,14 @@ Copart web pull — stage 1 of the analytics pipeline. RAW SOURCE ARCHIVE ONLY.
 
     pull_copart_web_01.py
         -> data/open/json-raw/copart/copartweb_copart_open_*.json
-        -> future copart_web_adapt_01.py
+    pull_apibara_01.py copart open|live -> copart_vpic_adapt_01.py
+        -> copart_web_adapt_01.py WEB.json --enrich-from VPIC.json
         -> apibara_json2csv_copart_01.py
 
-``copart_vpic_adapt_01.py`` is deliberately NOT in that chain: vPIC decodes a
-VIN and Copart masks the VIN here. See VIN MASKING below.
+The web archive cannot feed vPIC directly because Copart masks its VIN. The
+adapter instead joins a separately vPIC-enriched APIBara archive by Copart lot
+number, then validates year/make/model and the visible VIN prefix before it
+copies the full VIN or vPIC data. See VIN MASKING below.
 
 The browser URL supplied by the operator is the public discovery surface:
 
@@ -43,7 +46,7 @@ with Copart's exact YEAR, MAKE and *model-description* (MODL) facets:
 The returned ``lcy`` / ``mkn`` / ``lm`` fields then pass through a second,
 client-side exact gate. Rejected rows remain preserved in the raw page response
 and are named under ``queries[].excluded_identity``; they are merely absent from
-the top-level records handed to the future adapter.
+the top-level records handed to the adapter.
 
 SELLER — READ FROM THE SEARCH ROW, NOT FROM DETAILS
 ---------------------------------------------------
@@ -86,7 +89,11 @@ Copart masks the VIN on the public surface — ``fv`` arrives as
 ``WAUB4CF52JA******`` on 73 of 73 rows, in both search and detail responses.
 No full VIN means this source cannot feed ``copart_vpic_adapt_01.py`` (whose
 VIN_RE rejects the mask) and cannot be VIN-joined to an APIBara pull. Lots from
-this source are keyed by lot number alone. The count is reported per run.
+this source are therefore joined to APIBara by normalized Copart lot number.
+``copart_web_adapt_01.py`` treats that match only as a candidate: it also checks
+year/make/model and requires the visible VIN prefix to match the APIBara full
+VIN. Any conflict fails closed and remains in the join audit. The count is
+reported per run.
 
 MARKET SCOPE
 ------------
@@ -113,7 +120,9 @@ import http.cookiejar
 import json
 import math
 import re
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -270,6 +279,53 @@ class HttpSession:
         if referer:
             headers["Referer"] = referer
         return self.request(urllib.request.Request(url, headers=headers))
+
+
+BROWSER_POST_SCRIPT = Path(__file__).resolve().parent / "browser_post_json_01.ps1"
+START_BROWSER_SCRIPT = Path(__file__).resolve().parent / "start_copart_browser_01.ps1"
+
+
+def windows_path(path):
+    result = subprocess.run(["wslpath", "-w", str(Path(path).resolve())],
+                            check=True, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def browser_post_form(form, referer, timeout=90):
+    """Re-issue the search POST from inside copart.com in the operator's Chrome.
+
+    Copart's WAF can stop answering this endpoint over plain HTTP while the
+    same endpoint keeps working in a browser on the same machine -- observed
+    2026-08-20, when six of six yearly queries came back as interstitials and
+    a browser-origin fetch of the identical form returned 14/14 exact lots.
+
+    This is the site's own endpoint, called by the site's own origin, with the
+    session a person already established. It solves no challenge and retries
+    nothing; if the WAF is unsatisfied the interstitial comes straight back.
+    """
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-File", windows_path(START_BROWSER_SCRIPT)],
+        check=True, capture_output=True, text=True,
+    )
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
+        destination = Path(handle.name)
+    try:
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", windows_path(BROWSER_POST_SCRIPT),
+             "-Url", SEARCH_ENDPOINT, "-Origin", referer,
+             "-Body", urllib.parse.urlencode(form),
+             "-Out", windows_path(destination),
+             "-TimeoutSeconds", str(timeout)],
+            check=True, capture_output=True, text=True,
+        )
+        return 200, destination.read_text(encoding="utf-8", errors="replace"), {
+            "Content-Type": "application/json"}
+    except subprocess.CalledProcessError as error:
+        return 0, f"__ERROR__ browser_post: {(error.stderr or error.stdout)[:300]}", {}
+    finally:
+        destination.unlink(missing_ok=True)
 
 
 def json_body(body):
@@ -507,8 +563,19 @@ def parse_detail_json(payload):
 
 
 def is_challenge(body):
-    folded = str(body or "").casefold()
-    return "_incapsula_resource" in folded or "request unsuccessful" in folded
+    """True only for an Imperva interstitial, not for a real Copart response.
+
+    Copart embeds the Incapsula script on ordinary pages, so the marker alone
+    is a false positive -- it fired on a perfectly good 771 KB search page. An
+    interstitial is tiny and carries no page content, so require both signals.
+    """
+    text = str(body or "")
+    folded = text.casefold()
+    marker = "_incapsula_resource" in folded or "request unsuccessful" in folded
+    if not marker:
+        return False
+    # A real page is orders of magnitude larger and has a <title>.
+    return len(text) < 20000 and "<title>" not in folded
 
 
 def detail_payload_ok(payload):
@@ -595,6 +662,9 @@ def build_arg_parser():
                         help=f"search rows per request, 1-{PAGE_SIZE} (default: {PAGE_SIZE})")
     parser.add_argument("--delay", type=float, default=RATE_DELAY,
                         help=f"seconds between requests (default: {RATE_DELAY})")
+    parser.add_argument("--no-browser-fallback", action="store_true",
+                        help="fail on a WAF challenge instead of retrying the "
+                             "same request from the signed-in browser session")
     parser.add_argument("--keep-html", action="store_true",
                         help="retain successful fallback lot-page HTML in the raw archive")
     parser.add_argument("--out", help="output basename/path (default: auto-named)")
@@ -685,10 +755,22 @@ def main(argv=None):
             form = search_form(year, args.make, args.model, page_number, args.page_size)
             status, body, headers = session.post_form(SEARCH_ENDPOINT, form, referer)
             requests_made += 1
+            transport = "http"
             payload = json_body(body)
             results, error = parse_search_payload(payload)
+            if error and is_challenge(body) and not args.no_browser_fallback:
+                # The WAF stopped answering plain HTTP. Ask the same endpoint
+                # from inside the operator's browser session instead of
+                # recording six empty years and exiting non-zero.
+                print(f"      page {page_number}: challenged over HTTP — "
+                      "retrying from the browser session")
+                status, body, headers = browser_post_form(form, referer)
+                requests_made += 1
+                transport = "browser"
+                payload = json_body(body)
+                results, error = parse_search_payload(payload)
             page_entry = {
-                "page": page_number, "status": status,
+                "page": page_number, "status": status, "transport": transport,
                 "content_type": clean(headers.get("Content-Type") or headers.get("content-type")),
                 "request_form": form_summary(form), "raw": payload,
             }
@@ -832,7 +914,7 @@ def main(argv=None):
     print("\n" + "=" * 78)
     print(f"Done. {requests_made} HTTP request(s), 0 API quota used.")
     print(f"  JSON -> {out_path}")
-    print("  next: copart_web_adapt_01.py must reshape + exclude non-US before vPIC/CSV")
+    print("  next: copart_web_adapt_01.py reshapes + excludes non-US; use --enrich-from for APIBara/vPIC")
     return 0
 
 

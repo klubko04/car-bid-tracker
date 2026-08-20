@@ -3,7 +3,7 @@ Apibara pull — stage 1 of the analytics pipeline. RAW JSON ONLY.
 
     pull_apibara_01.py  ->  raw .json
         iaai   -> apibara_json2csv_iaai_01.py
-        copart -> copart_vpic_adapt_01.py -> future Copart flattener
+        copart -> copart_vpic_adapt_01.py -> apibara_json2csv_copart_01.py
 
 This script does exactly two things: build a server-side query, and archive the
 untouched responses. It applies NO filtering and derives NO fields — every

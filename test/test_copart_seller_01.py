@@ -67,14 +67,16 @@ class RegistryBeatsPublishedTypeTests(unittest.TestCase):
 
 
 class PlaceholderTests(unittest.TestCase):
-    def test_placeholders_keep_the_class_and_flag_the_missing_identity(self):
+    def test_insurance_placeholder_keeps_class_and_flags_missing_identity(self):
         insurance = copart_seller.classify("Insurance Company", "insurance")
         self.assertEqual(insurance["class"], "insurance")
         self.assertTrue(insurance["identity_withheld"])
         self.assertEqual(insurance["basis"], "placeholder_name")
 
+    def test_non_insurance_placeholder_is_untrusted(self):
         other = copart_seller.classify("Non-insurance Company", "non_insurance")
-        self.assertEqual(other["class"], "non_insurance")
+        self.assertEqual(other["class"], "unknown")
+        self.assertEqual(other["basis"], "untrusted_non_insurance")
         self.assertTrue(other["identity_withheld"])
 
     def test_literal_unknown_name_is_unknown_and_not_withheld(self):
@@ -123,12 +125,45 @@ class AbsenceTests(unittest.TestCase):
     def test_unknown_type_alone_does_not_assert_a_class(self):
         self.assertEqual(copart_seller.classify(None, "unknown")["class"], "unknown")
 
-    def test_unrecognised_name_is_not_unknown(self):
-        # Copart published an identity, so "unknown" would be a lie; we just
-        # cannot place it in a specific class.
+    def test_non_insurance_type_alone_does_not_assert_a_class(self):
+        result = copart_seller.classify(None, "non_insurance")
+        self.assertEqual(result["class"], "unknown")
+        self.assertEqual(result["basis"], "untrusted_non_insurance")
+
+    def test_unrecognised_name_keeps_identity_but_not_an_invented_class(self):
+        # The company identity is known, but its business type is not. Calling
+        # an unfamiliar insurer non_insurance would be a false negative.
         result = copart_seller.classify("Zzz Holdings Llc")
-        self.assertEqual(result["class"], "non_insurance")
+        self.assertEqual(result["name"], "Zzz Holdings Llc")
+        self.assertEqual(result["class"], "unknown")
         self.assertEqual(result["basis"], "unrecognized_name")
+
+    def test_unrecognised_name_does_not_inherit_unreliable_published_type(self):
+        result = copart_seller.classify("Zzz Holdings Llc", "non_insurance")
+        self.assertEqual(result["class"], "unknown")
+        self.assertEqual(result["basis"], "unrecognized_name")
+        self.assertEqual(result["published_type"], "non_insurance")
+
+    def test_operator_supplied_reference_names(self):
+        expected = {
+            "Bridgecrest Acceptance": "finance",
+            "Carbrain": "non_insurance",
+            "Csaa": "insurance",
+            "Gmfinancials": "finance",
+            "Flagship Credit Impounds": "finance",
+            "Jpmorgan Chase Bank Pip": "finance",
+            "Aig Insurance": "insurance",
+            "Bristol West Insurance": "insurance",
+            "Farmers Insurance": "insurance",
+            "Geico": "insurance",
+            "Insurance Company": "insurance",
+            "Progressive": "insurance",
+            "Usaa": "insurance",
+        }
+        for name, seller_class in expected.items():
+            with self.subTest(name=name):
+                result = copart_seller.classify(name)
+                self.assertEqual(result["class"], seller_class)
 
     def test_every_class_is_declared(self):
         for name, published in (("Geico", None), ("Santander", None),

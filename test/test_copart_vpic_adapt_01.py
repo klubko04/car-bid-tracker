@@ -157,6 +157,16 @@ class CopartVpicAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "copart_web_adapt_01.py"):
             adapter.validate_archive(Path("copartweb_copart_open.json"), archive)
 
+    def test_web_adapted_archive_is_not_sent_back_to_vpic(self):
+        archive = {
+            "platform": "copart",
+            "source": "copart-web-adapted",
+            "mode": "open",
+            "pages": [{"status": 200, "raw": {"data": [self.record()]}}],
+        }
+        with self.assertRaisesRegex(ValueError, "vPIC needs APIBara's full VIN"):
+            adapter.validate_archive(Path("adapted_copartweb_open.json"), archive)
+
     def test_market_scope_removes_canada_before_enrichment(self):
         us = self.record()
         canada = copy.deepcopy(us)
@@ -215,6 +225,35 @@ class CopartVpicAdapterTests(unittest.TestCase):
             vp = adapted["pages"][0]["raw"]["data"][0]["enrichment"]["nhtsa_vpic"]
             self.assertEqual(vp["status"], "decoded")
             self.assertEqual(vp["source_vin"], record["vin"])
+
+    def test_empty_live_archive_is_a_valid_zero_work_snapshot(self):
+        archive = {
+            "generated_at": "2026-08-19T12:00:00+00:00",
+            "platform": "copart",
+            "mode": "live",
+            "pages": [{"status": 200, "raw": {"data": [], "meta": {}}}],
+            "counts": {"records": 0, "calls_used": 1, "truncated": False},
+        }
+        cache = {"schema_version": 1, "updated_at": None, "decodes": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = tmp / "apibara_copart_live_audi_a5.json"
+            cache_path = tmp / "vpic_cache.json"
+            destination = tmp / "adapted_live.json"
+            source.write_text(json.dumps(archive), encoding="utf-8")
+            cache_path.write_text(json.dumps(cache), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = adapter.main([
+                    str(source), "--cache", str(cache_path), "--cache-only",
+                    "--out", str(destination),
+                ])
+            self.assertEqual(code, 0)
+            adapted = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertEqual(adapted["counts"]["records"], 0)
+            stats = adapted["adapter"]["nhtsa_vpic"]
+            self.assertEqual(stats["records"], 0)
+            self.assertEqual(stats["filled_values"], 0)
+            self.assertEqual(stats["decode_errors"], 0)
 
 
 if __name__ == "__main__":

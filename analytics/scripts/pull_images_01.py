@@ -412,7 +412,7 @@ def image_urls(row, size):
 # --------------------------------------------------------------------------
 # archiving lots that have left the listings
 # --------------------------------------------------------------------------
-def departed_lots():
+def departed_lots(platform="iaai"):
     """-> {lot_number} that lot_history_01 reports as gone.
 
     Shared by the archive pass and the download loop ON PURPOSE. They used to
@@ -424,11 +424,11 @@ def departed_lots():
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import lot_history_01 as HIST
-    import apibara_json2csv_iaai_01 as F
-    paths = HIST.all_archives()
+    paths = HIST.all_archives(platform)
     if not paths:
         return {}, {}
-    history = HIST.build_history(F.load_records(paths), paths)
+    records = HIST.load_records(paths, platform)
+    history = HIST.build_history(records, paths, platform)
     return {k for k, v in history.items() if v.get("exit_state") == "gone"}, history
 
 
@@ -455,7 +455,7 @@ def archive_sold(platform="iaai", apply=True, precomputed=None):
     comes back is found under sold/ and moved to open/ by the next image run
     rather than being downloaded a second time.
     """
-    gone, history = precomputed if precomputed else departed_lots()
+    gone, history = precomputed if precomputed else departed_lots(platform)
     if not history:
         return [], []
 
@@ -639,7 +639,8 @@ def main(argv=None):
     where = parse_where(args.where)
     path = resolve_csv(args.csv_file)
 
-    rows = list(csv.DictReader(open(path, encoding="utf-8")))
+    with path.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
     platform = infer_platform(rows, args.platform)
     model_folder = args.model_folder or derive_model_folder(rows)
 
@@ -649,12 +650,7 @@ def main(argv=None):
     # open, which is the pre-archive behaviour.
     gone = set()
     if args.archive_sold:
-        if platform != "iaai":
-            raise SystemExit(
-                "--archive-sold is currently IAAI-only because the history "
-                "engine has IAAI-specific listing semantics"
-            )
-        pre = departed_lots()
+        pre = departed_lots(platform)
         gone = pre[0]
         moved, skipped = archive_sold(platform, apply=not args.dry_run,
                                       precomputed=pre)
@@ -776,23 +772,33 @@ def main(argv=None):
     # per-group file would fragment the very history the rename logic relies on.
     man_path = IMAGES_ROOT / "open" / "manifest_open.csv"
     man_path.parent.mkdir(parents=True, exist_ok=True)
-    # Append, defensively. The manifest is the only record of WHEN a lot's
-    # photos were taken and when its VIN resolved, so a column change must not
-    # be able to silently truncate it.
+    # Append new snapshots, but replace every prior row for the SAME source CSV.
+    # A resumed run may narrow its final selection (for example after a stricter
+    # body-style audit), so retaining lots that disappeared from that snapshot
+    # would leave stale manifest entries.  Distinct source CSV snapshots still
+    # preserve history.
     existing = []
     if man_path.exists():
         try:
-            existing = list(csv.DictReader(open(man_path, encoding="utf-8")))
+            with man_path.open(encoding="utf-8", newline="") as stream:
+                existing = list(csv.DictReader(stream))
         except (OSError, csv.Error) as e:
             print(f"  !! could not read existing manifest ({e}); "
                   f"writing a .bak rather than overwriting")
             man_path.replace(man_path.with_suffix(".bak.csv"))
+    current_sources = {row.get("source_csv", "") for row in manifest}
+    retained = [
+        row for row in existing
+        if row.get("source_csv", "") not in current_sources
+    ]
     with open(man_path, "w", encoding="utf-8", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=MANIFEST_COLUMNS,
                             restval="", extrasaction="ignore")
         wr.writeheader()
-        wr.writerows(existing + manifest)
-    print(f"  manifest: {len(existing)} prior + {len(manifest)} new entries")
+        wr.writerows(retained + manifest)
+    replaced = len(existing) - len(retained)
+    print(f"  manifest: {len(retained)} prior + {len(manifest)} current entries"
+          f" ({replaced} resumed row(s) replaced)")
 
     print("\n" + "=" * 78)
     print(f"Done. {tot_dl} downloaded, {tot_skip} already present, {tot_fail} failed")
