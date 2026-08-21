@@ -12,6 +12,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -162,6 +163,59 @@ class CopartJson2CsvTests(unittest.TestCase):
         self.assertFalse(
             flat.style_matches("Hatchback/Liftback/Notchback", "coupe")
         )
+
+    def test_four_door_body_families_match_feed_variants(self):
+        self.assertTrue(
+            flat.style_matches("Hatchback/Liftback/Notchback", "hatchback")
+        )
+        self.assertTrue(flat.style_matches("HATCHBACK", "hatchback"))
+        self.assertTrue(flat.style_matches("Sedan/Saloon", "sedan"))
+        self.assertTrue(flat.style_matches("SEDAN", "sedan"))
+        self.assertFalse(flat.style_matches(None, "hatchback"))
+
+    def test_final_cut_keeps_unknown_body_and_limits_mileage_and_distance(self):
+        parser = flat.build_arg_parser()
+        args = parser.parse_args([
+            "--exclude-body-style", "coupe,convertible",
+            "--max-odometer", "99999",
+            "--max-distance", "2999",
+        ])
+        filters = flat.filters_from_args(args)
+
+        record = self.record()
+        self.assertEqual(flat.keep(record, filters), (True, ""))
+
+        for body_style in ("Coupe", "Convertible/Cabriolet"):
+            candidate = copy.deepcopy(record)
+            candidate["vehicle_specs"]["body_style"] = body_style
+            self.assertFalse(flat.keep(candidate, filters)[0], body_style)
+
+        candidate = copy.deepcopy(record)
+        candidate["vehicle_specs"]["body_style"] = None
+        self.assertTrue(flat.keep(candidate, filters)[0])
+
+        for miles in (100000, 100001, None):
+            candidate = copy.deepcopy(record)
+            candidate["odometer"]["mi"] = miles
+            self.assertFalse(flat.keep(candidate, filters)[0], miles)
+
+        with mock.patch.object(flat, "distance_mi", return_value=2999):
+            self.assertTrue(flat.keep(record, filters)[0])
+        for distance in (3000, None):
+            with self.subTest(distance=distance), mock.patch.object(
+                flat, "distance_mi", return_value=distance
+            ):
+                self.assertFalse(flat.keep(record, filters)[0])
+
+    def test_copart_location_format_is_available_before_gallery_capture(self):
+        record = self.record()
+        record["facility"].update({"lat": None, "lng": None})
+        record["location"]["display"] = "WA - NORTH SEATTLE"
+        self.assertLess(flat.distance_mi(record), 3000)
+        self.assertEqual(flat.distance_source(record), "location_display_approx")
+
+        record["location"]["display"] = "FL - MIAMI NORTH"
+        self.assertGreaterEqual(flat.distance_mi(record), 3000)
 
     def test_member_csv_retail_value_never_leaks_into_acv(self):
         record = self.record()

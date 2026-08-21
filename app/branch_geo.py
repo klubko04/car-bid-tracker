@@ -9,9 +9,9 @@ API's own distance/facility fields cannot be relied on.
 
 This module is a static, hand-curated city/state -> lat/lng table instead:
 city-level accuracy (not exact branch coordinates), which is enough to sort
-a lot into a 250-mile bucket. Unrecognized cities fall back to their state's
-geographic centroid; a location string that doesn't parse as "City (ST)"
-returns None / "unknown".
+a lot into a 250-mile bucket. It accepts IAAI's ``City (ST)`` and Copart's
+``ST - CITY`` display forms. Unrecognized cities fall back to their state's
+geographic centroid; an unparseable location returns None / "unknown".
 
 Extend CITY_COORDS as real branch names turn up in live pulls that aren't
 covered here.
@@ -87,9 +87,12 @@ _DIRECTIONAL_SUFFIXES = {
     "north", "south", "east", "west", "central", "nw", "ne", "sw", "se", "metro",
 }
 _DISPLAY_RE = re.compile(r"^(.*?)\s*\(([A-Za-z]{2})\)\s*$")
+_COPART_DISPLAY_RE = re.compile(r"^([A-Za-z]{2})\s*-\s*(.*?)\s*$")
 
 
 def _strip_directional(city_words: list) -> list:
+    while city_words and city_words[0].lower().strip(".,") in _DIRECTIONAL_SUFFIXES:
+        city_words = city_words[1:]
     while city_words and city_words[-1].lower().strip(".,") in _DIRECTIONAL_SUFFIXES:
         city_words = city_words[:-1]
     while city_words and city_words[-1].isdigit():
@@ -112,9 +115,13 @@ def coords_for_location(location_display: str):
     if not location_display:
         return None
     m = _DISPLAY_RE.match(location_display.strip())
-    if not m:
-        return None
-    city_raw, state = m.group(1), m.group(2).upper()
+    if m:
+        city_raw, state = m.group(1), m.group(2).upper()
+    else:
+        m = _COPART_DISPLAY_RE.match(location_display.strip())
+        if not m:
+            return None
+        state, city_raw = m.group(1).upper(), m.group(2)
     hit = _lookup_city(city_raw, state)
     if hit:
         return hit

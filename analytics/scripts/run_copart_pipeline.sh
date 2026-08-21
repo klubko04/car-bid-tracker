@@ -85,6 +85,11 @@ options:
 
 Re-run with the same run ID to resume idempotently.
 
+Every final csv-cut excludes identified Coupe/Convertible/Cabriolet lots and
+requires known odometer below 100,000 miles plus known distance below 3,000
+miles. Unknown body style is retained; unknown odometer/distance remains in
+csv-raw only.
+
 Twice-daily cadence, the whole Copart scope in one command:
     run_copart_pipeline.sh am        # morning: full chain, S5 A5 S4 RS5
     run_copart_pipeline.sh pm        # evening: open-side refresh only
@@ -209,8 +214,9 @@ case "$MODEL" in
     *) die "--model must be RS5, S5, A5, or S4" ;;
 esac
 MODEL_SLUG=${MODEL,,}
-FINAL_BODY_FILTERS=()
-CUT_QUALIFIER=""
+FINAL_MAX_ODOMETER=99999  # --max-odometer is inclusive; this means <100,000.
+FINAL_MAX_DISTANCE=2999   # --max-distance is inclusive; this means <3,000.
+CUT_QUALIFIER="_nocoupe_noconv_lt100k_lt3000mi"
 
 # stat.vin's model <select> values, read off its own search page. A BARE NAME
 # IS NOT A VALID SUBSTITUTE: "A5" happens to match, "S5" silently returns an
@@ -242,11 +248,8 @@ if [[ "$MODEL" == "A5" ]]; then
     ENDED_MAX_PAGES=50
     APIBARA_EXPECTED_CALLS=40
     TIER=2
-    # A5 is the Sportback cohort. Preserve every observation in canonical
-    # csv-raw, then exclude the Coupe/Convertible families from final history,
-    # image lifecycle, and downstream analysis artifacts.
-    FINAL_BODY_FILTERS=(--exclude-body-style coupe,convertible)
-    CUT_QUALIFIER="_nocoupe_noconv"
+    # A5 body variants remain in canonical csv-raw; final cuts explicitly
+    # remove identified Coupe/Convertible rows.
 fi
 if [[ "$MODEL" == "RS5" ]]; then
     # RS5 is the smallest cohort by a wide margin: a live Copart web probe on
@@ -263,10 +266,7 @@ if [[ "$MODEL" == "RS5" ]]; then
     APIBARA_EXPECTED_CALLS=8
     TIER=1
     # RS5 ships as Coupe and Sportback. Keep every observation in canonical
-    # csv-raw and exclude the coupe/convertible families from the final cut,
-    # matching the A5/S4 treatment.
-    FINAL_BODY_FILTERS=(--exclude-body-style coupe,convertible)
-    CUT_QUALIFIER="_nocoupe_noconv"
+    # csv-raw and exclude identified Coupe/Convertible rows from final cuts.
 fi
 if [[ "$MODEL" == "S4" ]]; then
     # S4 is the sedan cohort. A generous cap prevents a partial six-month
@@ -274,9 +274,10 @@ if [[ "$MODEL" == "S4" ]]; then
     ENDED_MAX_PAGES=50
     APIBARA_EXPECTED_CALLS=35
     TIER=1
-    FINAL_BODY_FILTERS=(--exclude-body-style coupe,convertible)
-    CUT_QUALIFIER="_nocoupe_noconv"
 fi
+# Unknown body style is deliberately retained. Only positively identified
+# Coupe/Convertible/Cabriolet families are excluded.
+FINAL_BODY_FILTERS=(--exclude-body-style coupe,convertible)
 APIBARA_HARD_CAP=$((ENDED_MAX_PAGES + STATE_MAX_PAGES + STATE_MAX_PAGES))
 
 ENDED_RAW="$SOLD_RAW/apibara_copart_ended_audi_${MODEL_SLUG}_2018-2023_${ENDED_FROM}_${ENDED_TO}_${RUN_ID}.json"
@@ -371,7 +372,7 @@ Call-budget estimate ($MODEL, --pass $PASS)
   Copart web search: expected 6 calls (one/year); hard cap 120
   NHTSA vPIC: cache misses / 50, calculated after each raw APIBara pull
   signed-in galleries: one browser page per csv-cut-selected incomplete lot
-    (body-style exclusions happen before gallery requests)
+    (body, odometer, seller, and distance cuts happen before gallery requests)
     workers: $GALLERY_WORKERS isolated tab(s), shared signed-in Chrome profile
   image CDN: one request per missing local image; existing non-empty files skip
 EOF
@@ -430,12 +431,14 @@ print_plan() {
         "$ENDED_VPIC" --out "$SOLD_RAW_CSV"
     print_command "$COPART_PIPELINE_PYTHON" "$SCRIPTS/data_pull_01.py" copart \
         "$ENDED_VPIC" --tier "$TIER" --sold-only "${FINAL_BODY_FILTERS[@]}" \
-        "${SELLER_EXCLUSIONS[@]}" \
+        "${SELLER_EXCLUSIONS[@]}" --max-odometer "$FINAL_MAX_ODOMETER" \
+        --max-distance "$FINAL_MAX_DISTANCE" \
         --history --history-cache --out "$SOLD_CUT"
     printf '11 preliminary open csv-cut selection (cheap; before gallery calls)\n'
     print_command "$COPART_PIPELINE_PYTHON" "$SCRIPTS/data_pull_01.py" copart \
         "$WEB_ENRICHED" --tier "$TIER" "${FINAL_BODY_FILTERS[@]}" \
-        "${SELLER_EXCLUSIONS[@]}" \
+        "${SELLER_EXCLUSIONS[@]}" --max-odometer "$FINAL_MAX_ODOMETER" \
+        --max-distance "$FINAL_MAX_DISTANCE" \
         --out "$OPEN_SELECTION"
     printf '12-13 selected gallery reuse/browser completion\n'
     printf '  media reuse sources are discovered at run time; remaining selected lots use\n'
@@ -450,7 +453,8 @@ print_plan() {
         '<selected-completed-media.json>' --out "$OPEN_RAW_CSV"
     print_command "$COPART_PIPELINE_PYTHON" "$SCRIPTS/data_pull_01.py" copart \
         '<selected-completed-media.json>' --tier "$TIER" "${FINAL_BODY_FILTERS[@]}" \
-        "${SELLER_EXCLUSIONS[@]}" \
+        "${SELLER_EXCLUSIONS[@]}" --max-odometer "$FINAL_MAX_ODOMETER" \
+        --max-distance "$FINAL_MAX_DISTANCE" \
         --history --history-cache --out "$OPEN_CUT"
     printf '16 sold/open image lifecycle + selected image download\n'
     print_command "$COPART_PIPELINE_PYTHON" "$SCRIPTS/pull_images_01.py" "$OPEN_CUT" \
@@ -487,23 +491,50 @@ flock -n 9 || die "run $RUN_ID is already active"
 # at the default 1 and aborted three cohorts out of four with
 # "already exists with different dates/config" -- a message that named neither
 # the field nor the value.
-CONFIG="version=5|scope=$MAKE-$MODEL-2018-2023|tier=$TIER"
+CONFIG="version=7|scope=$MAKE-$MODEL-2018-2023|tier=$TIER"
 CONFIG="$CONFIG|ended=$ENDED_FROM:$ENDED_TO"
 CONFIG="$CONFIG|caps=$ENDED_MAX_PAGES:$STATE_MAX_PAGES:$WEB_MAX_PAGES"
 CONFIG="$CONFIG|cut=${FINAL_BODY_FILTERS[*]:-none}"
+CONFIG="$CONFIG|max_odometer=$FINAL_MAX_ODOMETER"
+CONFIG="$CONFIG|max_distance=$FINAL_MAX_DISTANCE"
 CONFIG="$CONFIG|seller_cut=${SELLER_EXCLUSIONS[*]:-none}"
 CONFIG="$CONFIG|statvin=$STATVIN_MODEL|gallery_after_cut=true"
 CONFIG_SHA=$(printf '%s' "$CONFIG" | sha256sum | awk '{print $1}')
 if [[ -f "$RUN_DIR/config.sha256" ]]; then
     read -r SAVED_CONFIG < "$RUN_DIR/config.sha256"
     if [[ "$SAVED_CONFIG" != "$CONFIG_SHA" && "$MIGRATE_CONFIG" == "1" ]]; then
-        # Stages 01-09 read only the scope/window/caps, which a cut or
-        # stat.vin change does not touch, so their artifacts stay valid and
-        # their metered APIBara calls are not spent twice. Everything from the
-        # stat.vin pull onward depends on the new config and is re-run.
-        for stage_key in 08a-statvin-pull 08b-statvin-enrich 10-history-sold \
-                         11-open-selection 12-gallery-reuse 13-gallery-browser \
-                         14-csv-raw-open 15-history-open 16-images; do
+        # A cut-only migration starts at the sold/open selection. In
+        # particular, adding a body/mileage rule must not repeat the slow
+        # stat.vin browser pull. A stat.vin selector change starts at 08a.
+        # Window/page-cap changes alter metered source data and cannot safely
+        # reuse this namespace at all.
+        if [[ -f "$RUN_DIR/config.txt" ]]; then
+            read -r SAVED_CONFIG_TEXT < "$RUN_DIR/config.txt"
+            CHANGED_CONFIG_KEYS=$("$COPART_PIPELINE_PYTHON" - \
+                "$SAVED_CONFIG_TEXT" "$CONFIG" <<'PY'
+import sys
+old = dict(part.split("=", 1) for part in sys.argv[1].split("|") if "=" in part)
+new = dict(part.split("=", 1) for part in sys.argv[2].split("|") if "=" in part)
+print(",".join(sorted(key for key in set(old) | set(new)
+                      if old.get(key) != new.get(key))))
+PY
+            )
+        else
+            CHANGED_CONFIG_KEYS="unknown"
+        fi
+        case ",$CHANGED_CONFIG_KEYS," in
+            *,scope,*|*,ended,*|*,caps,*)
+                die "--migrate-config cannot reuse changed source scope/window/caps; choose a new --run-id" ;;
+        esac
+        migration_stages=(10-history-sold 11-open-selection 12-gallery-reuse
+                          13-gallery-browser 14-csv-raw-open 15-history-open
+                          16-images)
+        if [[ ",$CHANGED_CONFIG_KEYS," == *,statvin,* \
+              || "$CHANGED_CONFIG_KEYS" == "unknown" ]]; then
+            migration_stages=(08a-statvin-pull 08b-statvin-enrich
+                              "${migration_stages[@]}")
+        fi
+        for stage_key in "${migration_stages[@]}"; do
             rm -f "$RUN_DIR/$stage_key.done"
         done
         printf '%s\n' "$CONFIG_SHA" > "$RUN_DIR/config.sha256"
@@ -647,17 +678,37 @@ PY
 
 validate_final_csv() {
     validate_csv "$@" || return
-    ((${#FINAL_BODY_FILTERS[@]})) || return 0
     "$COPART_PIPELINE_PYTHON" - "$1" <<'PY'
-import csv, re, sys
+import csv, math, re, sys
 with open(sys.argv[1], encoding="utf-8", newline="") as stream:
     rows = list(csv.DictReader(stream))
-leaks = []
+body_leaks = []
+odometer_leaks = []
+distance_leaks = []
 for row in rows:
     style = str(row.get("body_style") or "").casefold()
-    if re.search(r"\b(coupe|convertible|cabriolet)\b", style):
-        leaks.append((row.get("lot_number"), row.get("body_style")))
-assert not leaks, f"final CSV contains Coupe/Convertible lots: {leaks[:8]}"
+    tokens = {token for token in re.split(r"[^a-z0-9]+", style) if token}
+    if tokens & {"coupe", "convertible", "cabriolet"}:
+        body_leaks.append((row.get("lot_number"), row.get("body_style")))
+    raw_miles = str(row.get("odometer_mi") or "").strip().replace(",", "")
+    try:
+        miles = float(raw_miles)
+        valid_miles = math.isfinite(miles) and miles < 100000
+    except ValueError:
+        valid_miles = False
+    if not valid_miles:
+        odometer_leaks.append((row.get("lot_number"), row.get("odometer_mi")))
+    raw_distance = str(row.get("distance_mi") or "").strip().replace(",", "")
+    try:
+        distance = float(raw_distance)
+        valid_distance = math.isfinite(distance) and distance < 3000
+    except ValueError:
+        valid_distance = False
+    if not valid_distance:
+        distance_leaks.append((row.get("lot_number"), row.get("distance_mi")))
+assert not body_leaks, f"final CSV contains Coupe/Convertible lots: {body_leaks[:8]}"
+assert not odometer_leaks, f"final CSV contains unknown or 100,000+ mileage: {odometer_leaks[:8]}"
+assert not distance_leaks, f"final CSV contains unknown or 3,000+ mile distance: {distance_leaks[:8]}"
 PY
 }
 
@@ -731,7 +782,7 @@ PY
 
 log "Copart pipeline run $RUN_ID started at $STARTED_AT"
 if [[ "${log_pending_migration:-0}" == "1" ]]; then
-    log "config migrated to v5 in place — stages 01-09 kept, 08a onward re-run"
+    log "config migrated to v7 in place — metered source and stat.vin stages kept when unchanged"
 fi
 if [[ "$PASS" == "pm" ]]; then
     if ((SOLD_INHERITED)); then
@@ -806,6 +857,8 @@ run_stage 09-csv-raw-sold "$SOLD_RAW_CSV" validate_csv \
 run_stage 10-history-sold "$SOLD_CUT" validate_final_csv \
     "$COPART_PIPELINE_PYTHON" "$SCRIPTS/data_pull_01.py" copart "$ENDED_VPIC" \
     --tier "$TIER" --sold-only "${FINAL_BODY_FILTERS[@]}" "${SELLER_EXCLUSIONS[@]}" \
+    --max-odometer "$FINAL_MAX_ODOMETER" \
+    --max-distance "$FINAL_MAX_DISTANCE" \
     --history --history-cache --out "$SOLD_CUT"
 
 # This cheap preliminary cut is the authoritative gallery allowlist. Full
@@ -813,6 +866,8 @@ run_stage 10-history-sold "$SOLD_CUT" validate_final_csv \
 run_stage 11-open-selection "$OPEN_SELECTION" validate_final_csv \
     "$COPART_PIPELINE_PYTHON" "$SCRIPTS/data_pull_01.py" copart "$WEB_ENRICHED" \
     --tier "$TIER" "${FINAL_BODY_FILTERS[@]}" "${SELLER_EXCLUSIONS[@]}" \
+    --max-odometer "$FINAL_MAX_ODOMETER" \
+    --max-distance "$FINAL_MAX_DISTANCE" \
     --out "$OPEN_SELECTION"
 
 REUSE_COMMAND=("$COPART_PIPELINE_PYTHON" "$SCRIPTS/copart_image_enrich_01.py"
@@ -857,6 +912,8 @@ run_stage 14-csv-raw-open "$OPEN_RAW_CSV" validate_csv \
 run_stage 15-history-open "$OPEN_CUT" validate_final_csv \
     "$COPART_PIPELINE_PYTHON" "$SCRIPTS/data_pull_01.py" copart "$FINAL_MEDIA" \
     --tier "$TIER" "${FINAL_BODY_FILTERS[@]}" "${SELLER_EXCLUSIONS[@]}" \
+    --max-odometer "$FINAL_MAX_ODOMETER" \
+    --max-distance "$FINAL_MAX_DISTANCE" \
     --history --history-cache --out "$OPEN_CUT"
 
 IMAGE_MANIFEST="$ROOT/images/open/manifest_open.csv"
@@ -894,7 +951,7 @@ if log_path.is_file():
     for stage, seconds in pattern.findall(log_path.read_text(encoding="utf-8")):
         attempt_timings.setdefault(stage, []).append(int(seconds))
 manifest = {
-    "pipeline": f"copart-{model.lower()}", "version": 4, "run_id": run_id,
+    "pipeline": f"copart-{model.lower()}", "version": 7, "run_id": run_id,
     "scope": {"make": make, "model": model, "year_from": 2018, "year_to": 2023,
               "market": "UnitedStates", "ended_from": date_from, "ended_to": date_to},
     "started_at": started, "completed_at": completed,
@@ -902,6 +959,9 @@ manifest = {
     "optimization": {
         "gallery_after_preliminary_cut": True,
         "gallery_allowlist": artifacts[-1],
+        "final_body_rule": "exclude identified coupe/convertible; unknown retained",
+        "final_odometer_rule": "known miles < 100000",
+        "final_distance_rule": "known distance miles < 3000",
     },
     "stage_timings_seconds": dict(sorted(timings.items())),
     "stage_attempt_timings_seconds": dict(sorted(attempt_timings.items())),

@@ -105,13 +105,13 @@ bid in `exit_price_source`. If the lot appears active later, history treats it
 as a relist and keeps its images under `images/open`; otherwise
 `--archive-sold` moves the existing folder to the matching `images/sold` tree.
 
-### Repeatable Copart S5/A5 runner
+### Repeatable Copart runner
 
-`run_copart_pipeline.sh` owns the proven S5/A5 sequence: six-month APIBara Ended,
-six exact-year Copart web searches, APIBara Open and Live, all three vPIC
-adapters, lot-number enrichment, verified gallery reuse/capture, sold and open
-`csv-raw`, history-enabled `csv-cut`, then the sold/open image lifecycle and
-missing-image download.
+`run_copart_pipeline.sh` owns the proven S5/A5/S4/RS5 sequence: six-month
+APIBara Ended, six exact-year Copart web searches, APIBara Open and Live, all
+three vPIC adapters, lot-number enrichment, verified gallery reuse/capture,
+sold and open `csv-raw`, history-enabled `csv-cut`, then the sold/open image
+lifecycle and missing-image download.
 
 ```bash
 # Inspect paths, stages and request ceilings; performs no writes or calls.
@@ -136,6 +136,13 @@ batches of 50. Gallery cost is printed after prior verified media are reused;
 only still-incomplete lots open in the dedicated signed-in browser. Its
 thumbnail pacing remains 1.25 seconds.
 
+The preliminary selection and both final `csv-cut` stages apply the same rules
+before gallery work: all four models exclude identified Coupe and
+Convertible/Cabriolet lots, require known odometer strictly below 100,000
+miles, and require known distance strictly below 3,000 miles. Unknown body
+style is retained; unknown odometer or distance is excluded. Every observation
+remains available in `csv-raw` for audit.
+
 Each stage writes an explicit timestamped artifact and receives a `.done`
 checkpoint only after both its process and artifact validation succeed. HTTP
 errors, truncation, failed web queries, Canada leakage, duplicate CSV lots,
@@ -146,9 +153,10 @@ replaced rather than duplicated. The runner fails before making API calls if
 its Python interpreter cannot import the declared `httpx` dependency; activate
 the environment installed from `requirements.txt`, or set
 `COPART_PIPELINE_PYTHON=/path/to/python`. State, per-stage logs and the final
-artifact manifest live under `analytics/data/runs/copart/{s5|a5}/<run-id>/` and
-are ignored by git. The runner rejects models outside 2018–2023 Audi S5/A5;
-A4/S4/RS5 remain deferred.
+artifact manifest live under
+`analytics/data/runs/copart/{s5|a5|s4|rs5}/<run-id>/` and are ignored by git.
+The runner rejects models outside 2018–2023 Audi S5/A5/S4/RS5; other
+make/model/year cohorts remain deferred.
 
 Copart bid conditions are retained independently from the current bid:
 `bid_type` carries Copart's visible `Pure Sale`, `Minimum Bid`, `On Approval`,

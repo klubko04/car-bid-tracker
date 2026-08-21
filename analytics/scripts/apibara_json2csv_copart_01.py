@@ -566,12 +566,12 @@ def norm_style(value):
 
 
 def style_matches(value, selector):
-    """Match exact styles plus the two body families used by final cuts.
+    """Match exact styles plus the body families used by final cuts.
 
     vPIC may report ``Convertible/Cabriolet`` while Copart web reports
-    ``CONVERTIBLE``. Likewise some feeds decorate ``Coupe`` with door-count
-    text. Treat those representations as one family without making unrelated
-    multi-word style filters fuzzy.
+    ``CONVERTIBLE``; vPIC also emits compound four-door values such as
+    ``Hatchback/Liftback/Notchback`` and ``Sedan/Saloon``. Treat those
+    representations as families without making unrelated filters fuzzy.
     """
     style = norm_style(value)
     wanted = norm_style(selector)
@@ -582,6 +582,10 @@ def style_matches(value, selector):
         return "coupe" in tokens
     if wanted in {"convertible", "cabriolet"}:
         return bool(tokens & {"convertible", "cabriolet"})
+    if wanted in {"hatchback", "liftback", "notchback"}:
+        return bool(tokens & {"hatchback", "liftback", "notchback"})
+    if wanted in {"sedan", "saloon"}:
+        return bool(tokens & {"sedan", "saloon"})
     return False
 
 

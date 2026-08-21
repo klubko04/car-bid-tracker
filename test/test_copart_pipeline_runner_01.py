@@ -51,6 +51,11 @@ class CopartPipelineRunnerTests(unittest.TestCase):
         self.assertIn("expected ~17 calls; hard cap 45", output)
         self.assertIn("expected 6 calls (one/year); hard cap 120", output)
         self.assertIn("2018-2023 Audi S5", output)
+        self.assertIn("--exclude-body-style coupe\\,convertible", output)
+        self.assertIn("--max-odometer 99999", output)
+        self.assertIn("--max-distance 2999", output)
+        self.assertIn("nocoupe_noconv_lt100k_lt3000mi", output)
+        self.assertNotIn("--body-style", output)
         for unsupported in ("Audi A4", "Audi S4", "Audi A5", "Audi RS5", "Audi RS 5"):
             self.assertNotIn(unsupported, output)
         self.assertIn("No files, browser sessions, API calls, or image downloads", output)
@@ -74,6 +79,8 @@ class CopartPipelineRunnerTests(unittest.TestCase):
         self.assertIn("workers: 3 isolated tab(s)", result.stdout)
         self.assertIn("--workers 3", result.stdout)
         self.assertIn("--exclude-body-style coupe\\,convertible", result.stdout)
+        self.assertIn("--max-odometer 99999", result.stdout)
+        self.assertIn("--max-distance 2999", result.stdout)
         self.assertIn("--tier 2", result.stdout)
         self.assertIn("nocoupe_noconv", result.stdout)
 
@@ -94,6 +101,8 @@ class CopartPipelineRunnerTests(unittest.TestCase):
             result.stdout.index("selected gallery reuse/browser completion"),
         )
         self.assertIn("--exclude-body-style coupe\\,convertible", result.stdout)
+        self.assertIn("--max-odometer 99999", result.stdout)
+        self.assertIn("--max-distance 2999", result.stdout)
         self.assertIn("--tier 1", result.stdout)
 
     def test_models_outside_validated_set_fail_closed(self):
@@ -109,6 +118,8 @@ class CopartPipelineRunnerTests(unittest.TestCase):
         # Smallest cohort: 26 open lots on the 2026-08-19 probe, so a small cap.
         self.assertIn("ended <= 15", result.stdout)
         self.assertIn("--exclude-body-style coupe\\,convertible", result.stdout)
+        self.assertIn("--max-odometer 99999", result.stdout)
+        self.assertIn("--max-distance 2999", result.stdout)
         self.assertIn("--tier 1", result.stdout)
 
     def test_pm_pass_uses_its_own_namespace(self):
@@ -169,6 +180,12 @@ class CopartPipelineRunnerTests(unittest.TestCase):
             source.index("validate_apibara_ended()"),
             source.index("run_stage 01-apibara-ended"),
         )
+
+    def test_cut_migration_does_not_invalidate_statvin(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn('migration_stages=(10-history-sold', source)
+        self.assertIn('if [[ ",$CHANGED_CONFIG_KEYS," == *,statvin,*', source)
+        self.assertIn('migration_stages=(08a-statvin-pull 08b-statvin-enrich', source)
 
     def test_stubbed_full_run_resumes_without_reexecuting_stages(self):
         stub = r'''#!/usr/bin/env python3
@@ -269,11 +286,16 @@ if __name__ == "__main__":
         path = output_arg()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=["platform", "lot_number", "model", "market"])
+            writer = csv.DictWriter(
+                stream,
+                fieldnames=["platform", "lot_number", "model", "market",
+                            "body_style", "odometer_mi", "distance_mi"],
+            )
             writer.writeheader()
             writer.writerow({"platform": "copart", "lot_number": "64982206",
                              "model": selected_model(),
-                             "market": "UnitedStates"})
+                             "market": "UnitedStates", "body_style": "HATCHBACK",
+                             "odometer_mi": "99999", "distance_mi": "2999"})
     elif name == "pull_images_01.py":
         root = Path(__file__).resolve().parents[2]
         manifest = root / "images" / "open" / "manifest_open.csv"
